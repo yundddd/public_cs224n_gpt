@@ -181,7 +181,7 @@ def train(args):
             num_batches += 1
 
         train_loss = train_loss / num_batches
-        print(f"Epoch {epoch}: train loss :: {train_loss :.3f}.")
+        print(f"Epoch {epoch}: train loss :: {train_loss:.3f}.")
         print('Generating several output sonnets...')
         model.eval()
         for batch in held_out_sonnet_dataset:
