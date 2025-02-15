@@ -21,6 +21,17 @@ class CausalSelfAttention(nn.Module):
         # observe that it yields better performance.
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
+        # custom code to precompute causal mask. Only able to pass sanity check if this is added.
+        causal_mask = torch.tril(
+            torch.ones(
+                (config.max_position_embeddings,
+                 config.max_position_embeddings),
+                dtype=torch.float32))
+        causal_mask = causal_mask.masked_fill(
+            causal_mask == 0, float('-inf'))
+        causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
+        self.register_buffer("causal_mask", causal_mask)
+
     def transform(self, x, linear_layer):
         # The corresponding linear_layer of k, v, q are used to project the hidden_state (x).
         proj = linear_layer(x)
@@ -38,8 +49,10 @@ class CausalSelfAttention(nn.Module):
         attention_scores = torch.matmul(
             query, key.transpose(-1, -2)) / (self.attention_head_size ** 0.5)
 
-        # mask out padding tokens as well as future tokens
-        attention_scores.masked_fill_((attention_mask) == 0, -1e9)
+        # apply mask
+        attention_scores = attention_scores + attention_mask + \
+            self.causal_mask[:, :, :attention_scores.size(-1), :attention_scores.size(-1)]
+
         # Normalize the attention scores.
         attention_probs = nn.Softmax(dim=-1)(attention_scores)
         attention_probs = self.dropout(attention_probs)
