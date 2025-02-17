@@ -22,13 +22,13 @@ class CausalSelfAttention(nn.Module):
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
         # custom code to precompute causal mask. Only able to pass sanity check if this is added.
-        causal_mask = torch.tril(
+        causal_mask = torch.triu(
             torch.ones(
                 (config.max_position_embeddings,
                  config.max_position_embeddings),
-                dtype=torch.float32))
+                dtype=torch.float32), diagonal=1)
         causal_mask = causal_mask.masked_fill(
-            causal_mask == 0, float('-inf'))
+            causal_mask == 1, float('-inf'))
         causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
         self.register_buffer("causal_mask", causal_mask)
 
