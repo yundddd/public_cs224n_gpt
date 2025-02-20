@@ -75,8 +75,10 @@ class ParaphraseGPT(nn.Module):
         """
 
         'Takes a batch of sentences and produces embeddings for them.'
-        # YOUR CODE HERE
-        raise NotImplementedError
+        gpt_output = self.gpt(input_ids=input_ids, attention_mask=attention_mask)
+        last_token_hidden_state = gpt_output["last_token"]
+        logits = self.paraphrase_detection_head(last_token_hidden_state)
+        return logits
 
 
 def save_model(model, optimizer, args, filepath):
@@ -92,6 +94,10 @@ def save_model(model, optimizer, args, filepath):
     torch.save(save_info, filepath)
     print(f"save the model to {filepath}")
 
+# Mapping function
+def map_labels(labels):
+    label_map = {3919: 1, 8505: 0}
+    return torch.tensor([label_map[label.item()] for label in labels], dtype=torch.long)
 
 def train(args):
     """Train GPT-2 for paraphrase detection on the Quora dataset."""
@@ -131,12 +137,14 @@ def train(args):
             b_ids = b_ids.to(device)
             b_mask = b_mask.to(device)
             labels = labels.to(device)
+            # Map labels to 0 and 1
+            mapped_labels = map_labels(labels).to(device)
 
             # Compute the loss, gradients, and update the model's parameters.
             optimizer.zero_grad()
             logits = model(b_ids, b_mask)
             preds = torch.argmax(logits, dim=1)
-            loss = F.cross_entropy(logits, labels, reduction='mean')
+            loss = F.cross_entropy(logits, mapped_labels, reduction='mean')
             loss.backward()
             optimizer.step()
 
