@@ -18,17 +18,19 @@ import time
 
 import numpy as np
 import torch.nn.functional as F
-
+from transformers import GPT2Tokenizer
 from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-
+from einops import rearrange
 from datasets import (
     ParaphraseDetectionDataset,
     ParaphraseDetectionTestDataset,
+    ParaphraseDetectionNLPDataset,
+    ParaphraseDetectionNLPHoldOutDataset,
     load_paraphrase_data
 )
-from evaluation import model_eval_paraphrase, model_test_paraphrase
+
 from models.gpt2 import GPT2Model
 
 from optimizer import AdamW
@@ -53,33 +55,75 @@ class ParaphraseGPT(nn.Module):
 
     def __init__(self, args):
         super().__init__()
+        self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+        self.tokenizer.pad_token = self.tokenizer.eos_token
         self.gpt = GPT2Model.from_pretrained(
             model=args.model_size, d=args.d, l=args.l, num_heads=args.num_heads)
-        # Paraphrase detection has two outputs: 1 (yes) or 0 (no).
-        self.paraphrase_detection_head = nn.Linear(args.d, 2)
 
         # By default, fine-tune the full model.
         for param in self.gpt.parameters():
             param.requires_grad = True
 
     def forward(self, input_ids, attention_mask):
-        """
-        TODO: Predict the label of the token using the paraphrase_detection_head Linear layer.
-
-        We structure the input as:
-
-          'Is "{s1}" a paraphrase of "{s2}"? Answer "yes" or "no": '
-
-        So you want to find the prediction for the next token at the end of this sentence. Optimistically, it will be the
-        token "yes" (byte pair encoding index of 8505) for examples that are paraphrases or "no" (byte pair encoding index
-         of 3919) for examples that are not paraphrases.
-        """
-
-        'Takes a batch of sentences and produces embeddings for them.'
         gpt_output = self.gpt(input_ids=input_ids, attention_mask=attention_mask)
-        last_token_hidden_state = gpt_output["last_token"]
-        logits = self.paraphrase_detection_head(last_token_hidden_state)
+        last_hidden_state = gpt_output["last_hidden_state"]
+        logits = self.gpt.hidden_state_to_token(last_hidden_state)
         return logits
+
+    def get_device(self):
+        for param in self.gpt.parameters():
+            return param.device
+
+    @torch.no_grad()
+    def generate(self, encoding, temperature=0.7, top_p=0.9, max_length=128):
+        """
+        Generates an original sonnet using top-p sampling and softmax temperature.
+
+        TODO: this is probably not ideal. You can look at hugging face's model.generate(...) function for inspiration.
+        In particular, generating multiple sequences and choosing the best with beam search is one avenue. Top_k is another;
+        there are many.
+        """
+        token_ids = encoding.to(self.get_device())
+        attention_mask = torch.ones(
+            token_ids.shape, dtype=torch.int64).to(
+            self.get_device())
+
+        for _ in range(max_length):
+            # Forward pass to get logits
+            logits_sequence = self.forward(token_ids, attention_mask)
+            # Apply temperature scaling
+            logits_last_token = logits_sequence[:, -1, :] / temperature
+
+            # Convert logits to probabilities
+            probs = torch.nn.functional.softmax(logits_last_token, dim=-1)
+
+            # Top-p (nucleus) sampling
+            sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+            top_p_mask = cumulative_probs <= top_p
+            # Shift mask right for proper thresholding
+            top_p_mask[..., 1:] = top_p_mask[..., :-1].clone()
+            top_p_mask[..., 0] = True  # Always include the highest probability token
+            filtered_probs = sorted_probs * top_p_mask  # Zero out unlikely tokens
+            # Normalize probabilities
+            filtered_probs /= filtered_probs.sum(dim=-1, keepdim=True)
+
+            # Sample from filtered distribution
+            sampled_index = torch.multinomial(filtered_probs, 1)
+            sampled_token = sorted_indices.gather(dim=-1, index=sampled_index)
+
+            # Stop if end-of-sequence token is reached
+            if sampled_token.item() == self.tokenizer.eos_token_id:
+                break
+
+            # Append sampled token
+            token_ids = torch.cat([token_ids, sampled_token], dim=1)
+            attention_mask = torch.cat([attention_mask, torch.ones(
+                (1, 1), dtype=torch.int64).to(self.get_device())], dim=1)
+
+        generated_output = self.tokenizer.decode(
+            token_ids[0].cpu().numpy().tolist())[3:]
+        return token_ids, generated_output
 
 
 def save_model(model, optimizer, args, filepath):
@@ -95,26 +139,26 @@ def save_model(model, optimizer, args, filepath):
     torch.save(save_info, filepath)
     print(f"save the model to {filepath}")
 
-# Mapping function
-def map_labels(labels):
-    label_map = {3919: 1, 8505: 0}
-    return torch.tensor([label_map[label.item()] for label in labels], dtype=torch.long)
 
 def train(args):
     """Train GPT-2 for paraphrase detection on the Quora dataset."""
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
     # Create the data and its corresponding datasets and dataloader.
-    para_train_data = load_paraphrase_data(args.para_train)
+    para_train_data = load_paraphrase_data(args.para_train)[:4]
     para_dev_data = load_paraphrase_data(args.para_dev)
 
-    para_train_data = ParaphraseDetectionDataset(para_train_data, args)
-    para_dev_data = ParaphraseDetectionDataset(para_dev_data, args)
+    para_train_data = ParaphraseDetectionNLPDataset(para_train_data, args)
+    para_dev_data = ParaphraseDetectionNLPDataset(para_dev_data, args)
+    para_hold_out_dev_data = ParaphraseDetectionNLPHoldOutDataset(para_dev_data, args)
 
     para_train_dataloader = DataLoader(
         para_train_data, shuffle=True, batch_size=args.batch_size,
         collate_fn=para_train_data.collate_fn)
     para_dev_dataloader = DataLoader(
         para_dev_data, shuffle=False, batch_size=args.batch_size,
+        collate_fn=para_dev_data.collate_fn)
+    para_hold_out_dev_dataloader = DataLoader(
+        para_hold_out_dev_data, shuffle=False, batch_size=args.batch_size,
         collate_fn=para_dev_data.collate_fn)
 
     args = add_arguments(args)
@@ -126,33 +170,25 @@ def train(args):
     best_dev_acc = 0
 
     # Run for the specified number of epochs.
-    total_forward_time = 0
-    total_backward_time = 0
-    total_forward_mem = 0
-    total_backward_mem = 0
     for epoch in range(args.epochs):
-        torch.cuda.synchronize()
-        start_time = time.time()
-        start_mem = torch.cuda.memory_allocated()
         model.train()
         train_loss = 0
         num_batches = 0
         for batch in tqdm(
                 para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
             # Get the input and move it to the gpu (I do not recommend training this model on CPU).
-            b_ids, b_mask, labels = batch['token_ids'], batch['attention_mask'], batch['labels'].flatten(
-            )
+            b_ids, b_mask = batch['token_ids'], batch['attention_mask']
             b_ids = b_ids.to(device)
             b_mask = b_mask.to(device)
-            labels = labels.to(device)
-            # Map labels to 0 and 1
-            mapped_labels = map_labels(labels).to(device)
 
             # Compute the loss, gradients, and update the model's parameters.
             optimizer.zero_grad()
             logits = model(b_ids, b_mask)
-            preds = torch.argmax(logits, dim=1)
-            loss = F.cross_entropy(logits, mapped_labels, reduction='mean')
+            # Ignore the last prediction in the sequence.
+            logits = rearrange(logits[:, :-1].contiguous(), 'b t d -> (b t) d')
+            # Ignore the first token to compose the labels.
+            labels = b_ids[:, 1:].contiguous().flatten()
+            loss = F.cross_entropy(logits, labels, reduction='mean')
             loss.backward()
             optimizer.step()
 
@@ -161,18 +197,19 @@ def train(args):
 
         train_loss = train_loss / num_batches
 
-        dev_acc, dev_f1, *_ = model_eval_paraphrase(para_dev_dataloader, model, device)
-        torch.cuda.synchronize()
-        end_time = time.time()
-        end_mem = torch.cuda.memory_allocated()
+        print('Generating several output sonnets...')
+        model.eval()
+        for batch in para_hold_out_dev_dataloader:
+            text = model.tokenizer.decode(batch["token_ids"][0])
+            print(f"Input: {text}")
+            output = model.generate(
+                batch["token_ids"],
+                temperature=1.2, top_p=0.9)
+            print(output)
+            print(f'output:{model.tokenizer.decode(output)}\n\n')
 
-        if dev_acc > best_dev_acc:
-            best_dev_acc = dev_acc
-            save_model(model, optimizer, args, args.filepath)
+        print(f"Epoch {epoch}")
 
-        print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, dev acc :: {dev_acc :.3f}")
-        print(f"Total Pass Time: {end_time - start_time::.6f} sec")
-        print(f"Total Memory Usage: {(end_mem - start_mem) / 1e6:.2f} MB")
 
 @torch.no_grad()
 def test(args):
@@ -203,7 +240,7 @@ def test(args):
         para_dev_dataloader,
         model,
         device)
-    print(f"dev paraphrase acc :: {dev_para_acc :.3f}")
+    print(f"dev paraphrase acc :: {dev_para_acc:.3f}")
     test_para_y_pred, test_para_sent_ids = model_test_paraphrase(
         para_test_dataloader, model, device)
 
