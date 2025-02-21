@@ -14,6 +14,7 @@ trains and evaluates your ParaphraseGPT model and writes the required submission
 import argparse
 import random
 import torch
+import time
 
 import numpy as np
 import torch.nn.functional as F
@@ -125,7 +126,14 @@ def train(args):
     best_dev_acc = 0
 
     # Run for the specified number of epochs.
+    total_forward_time = 0
+    total_backward_time = 0
+    total_forward_mem = 0
+    total_backward_mem = 0
     for epoch in range(args.epochs):
+        torch.cuda.synchronize()
+        start_time = time.time()
+        start_mem = torch.cuda.memory_allocated()
         model.train()
         train_loss = 0
         num_batches = 0
@@ -154,13 +162,17 @@ def train(args):
         train_loss = train_loss / num_batches
 
         dev_acc, dev_f1, *_ = model_eval_paraphrase(para_dev_dataloader, model, device)
+        torch.cuda.synchronize()
+        end_time = time.time()
+        end_mem = torch.cuda.memory_allocated()
 
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
             save_model(model, optimizer, args, args.filepath)
 
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, dev acc :: {dev_acc :.3f}")
-
+        print(f"Total Pass Time: {end_time - start_time::.6f} sec")
+        print(f"Total Memory Usage: {(end_mem - start_mem) / 1e6:.2f} MB")
 
 @torch.no_grad()
 def test(args):
