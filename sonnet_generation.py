@@ -7,6 +7,9 @@ Running:
 trains your SonnetGPT model and writes the required submission files.
 '''
 
+import os
+import wandb
+from datetime import datetime
 import argparse
 import random
 import torch
@@ -28,6 +31,10 @@ from models.gpt2 import GPT2Model
 from optimizer import AdamW
 
 TQDM_DISABLE = False
+
+# nobody cares about security
+os.environ['WANDB_API_KEY'] = 'd8e70c9cb01a88ace48a2ec6d18bd9e9be24c73b'
+os.environ['WANDB_ENTITY'] = 'yundddd-stanford-university'
 
 
 # Fix the random seed.
@@ -194,9 +201,13 @@ def train(args):
                 encoding['input_ids'],
                 temperature=args.temperature, top_p=args.top_p)
             print(f'{batch[1]}{output[1]}\n\n')
+            wandb.log({"input": batch[1], "output": output[1]})
+            break
 
         # TODO: consider a stopping condition to prevent overfitting on the small dataset of sonnets.
         save_model(model, optimizer, args, f'{epoch}_{args.filepath}')
+
+        wandb.log({"train_loss": train_loss, "epoch": epoch})
 
 
 @torch.no_grad()
@@ -289,5 +300,13 @@ if __name__ == "__main__":
     args = get_args()
     args.filepath = f'{args.epochs}-{args.lr}-sonnet.pt'  # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
+
+    wandb.init(
+        project="cs224n",
+        config=args,
+        name="sonnet" + datetime.now().strftime("%m-%d %H:%M:%S ")
+    )
+    wandb.run.log_code(include_fn=lambda path: path.endswith(".py"))
     train(args)
     generate_submission_sonnets(args)
+    wandb.finish()

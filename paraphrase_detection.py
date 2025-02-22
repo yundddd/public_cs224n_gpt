@@ -11,6 +11,15 @@ Running:
 trains and evaluates your ParaphraseGPT model and writes the required submission files.
 '''
 
+from datetime import datetime
+from optimizer import AdamW
+from models.gpt2 import GPT2Model
+from evaluation import model_eval_paraphrase, model_test_paraphrase
+from datasets import (
+    ParaphraseDetectionDataset,
+    ParaphraseDetectionTestDataset,
+    load_paraphrase_data
+)
 import argparse
 import random
 import torch
@@ -23,15 +32,12 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from datasets import (
-    ParaphraseDetectionDataset,
-    ParaphraseDetectionTestDataset,
-    load_paraphrase_data
-)
-from evaluation import model_eval_paraphrase, model_test_paraphrase
-from models.gpt2 import GPT2Model
+import wandb
+import os
+# nobody cares about security
+os.environ['WANDB_API_KEY'] = 'd8e70c9cb01a88ace48a2ec6d18bd9e9be24c73b'
+os.environ['WANDB_ENTITY'] = 'yundddd-stanford-university'
 
-from optimizer import AdamW
 
 TQDM_DISABLE = False
 
@@ -96,9 +102,12 @@ def save_model(model, optimizer, args, filepath):
     print(f"save the model to {filepath}")
 
 # Mapping function
+
+
 def map_labels(labels):
     label_map = {3919: 1, 8505: 0}
     return torch.tensor([label_map[label.item()] for label in labels], dtype=torch.long)
+
 
 def train(args):
     """Train GPT-2 for paraphrase detection on the Quora dataset."""
@@ -126,14 +135,7 @@ def train(args):
     best_dev_acc = 0
 
     # Run for the specified number of epochs.
-    total_forward_time = 0
-    total_backward_time = 0
-    total_forward_mem = 0
-    total_backward_mem = 0
     for epoch in range(args.epochs):
-        torch.cuda.synchronize()
-        start_time = time.time()
-        start_mem = torch.cuda.memory_allocated()
         model.train()
         train_loss = 0
         num_batches = 0
@@ -162,17 +164,14 @@ def train(args):
         train_loss = train_loss / num_batches
 
         dev_acc, dev_f1, *_ = model_eval_paraphrase(para_dev_dataloader, model, device)
-        torch.cuda.synchronize()
-        end_time = time.time()
-        end_mem = torch.cuda.memory_allocated()
 
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
             save_model(model, optimizer, args, args.filepath)
 
-        print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, dev acc :: {dev_acc :.3f}")
-        print(f"Total Pass Time: {end_time - start_time::.6f} sec")
-        print(f"Total Memory Usage: {(end_mem - start_mem) / 1e6:.2f} MB")
+        print(f"Epoch {epoch}: train loss :: {train_loss:.3f}, dev acc :: {dev_acc:.3f}")
+        wandb.log({"train_loss": train_loss, "dev_acc": dev_acc, "epoch": epoch})
+
 
 @torch.no_grad()
 def test(args):
@@ -203,7 +202,7 @@ def test(args):
         para_dev_dataloader,
         model,
         device)
-    print(f"dev paraphrase acc :: {dev_para_acc :.3f}")
+    print(f"dev paraphrase acc :: {dev_para_acc:.3f}")
     test_para_y_pred, test_para_sent_ids = model_test_paraphrase(
         para_test_dataloader, model, device)
 
@@ -216,6 +215,8 @@ def test(args):
         f.write(f"id \t Predicted_Is_Paraphrase \n")
         for p, s in zip(test_para_sent_ids, test_para_y_pred):
             f.write(f"{p}, {s} \n")
+
+    wandb.log({"best dev": dev_para_acc})
 
 
 def get_args():
@@ -270,5 +271,13 @@ if __name__ == "__main__":
     args = get_args()
     args.filepath = f'{args.epochs}-{args.lr}-paraphrase.pt'  # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
+
+    wandb.init(
+        project="cs224n",
+        config=args,
+        name="paraphrase" + datetime.now().strftime("%m-%d %H:%M:%S ")
+    )
+    wandb.run.log_code(include_fn=lambda path: path.endswith(".py"))
     train(args)
     test(args)
+    wandb.finish()
