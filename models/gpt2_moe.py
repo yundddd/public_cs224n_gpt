@@ -49,4 +49,4 @@ class GPT2MoEModel(GPT2Model):
         last_non_pad_idx = attention_mask.sum(dim=1) - 1  # Subtract 1 to get last index
         last_token = sequence_output[torch.arange(
             sequence_output.shape[0]), last_non_pad_idx]
-        return {'last_hidden_state': sequence_output, 'last_token': last_token}, aux_loss
+        return {'last_hidden_state': sequence_output, 'last_token': last_token, 'aux_loss': aux_loss}
