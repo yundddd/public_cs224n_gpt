@@ -206,6 +206,7 @@ class GPT2Config(PretrainedConfig):
           gradient_checkpointing=False,
           position_embedding_type="learnable",
           use_cache=True,
+          use_flash_attention=False,
           **kwargs
   ):
     super().__init__(pad_token_id=pad_token_id, **kwargs)
@@ -225,6 +226,7 @@ class GPT2Config(PretrainedConfig):
     self.gradient_checkpointing = gradient_checkpointing
     self.position_embedding_type = position_embedding_type
     self.use_cache = use_cache
+    self.use_flash_attention = use_flash_attention
 
 
 

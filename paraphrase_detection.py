@@ -60,7 +60,8 @@ class ParaphraseGPT(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.gpt = GPT2Model.from_pretrained(
-            model=args.model_size, d=args.d, l=args.l, num_heads=args.num_heads)
+            model=args.model_size, d=args.d, l=args.l, num_heads=args.num_heads,
+            use_flash_attention=args.use_flash_attention)
         # Paraphrase detection has two outputs: 1 (yes) or 0 (no).
         self.paraphrase_detection_head = nn.Linear(args.d, 2)
 
@@ -146,14 +147,14 @@ def train(args):
             )
             b_ids = b_ids.to(device)
             b_mask = b_mask.to(device)
-            labels = labels.to(device)
+            # labels = labels.to(device)
             # Map labels to 0 and 1
             mapped_labels = map_labels(labels).to(device)
 
             # Compute the loss, gradients, and update the model's parameters.
             optimizer.zero_grad()
             logits = model(b_ids, b_mask)
-            preds = torch.argmax(logits, dim=1)
+            # preds = torch.argmax(logits, dim=1)
             loss = F.cross_entropy(logits, mapped_labels, reduction='mean')
             loss.backward()
             optimizer.step()
@@ -243,6 +244,7 @@ def get_args():
         help="The model size as specified on hugging face. DO NOT use the xl model.",
         choices=['gpt2', 'gpt2-medium', 'gpt2-large'],
         default='gpt2')
+    parser.add_argument("--use_flash_attention", action='store_true')
 
     args = parser.parse_args()
     return args
@@ -269,7 +271,7 @@ def add_arguments(args):
 
 if __name__ == "__main__":
     args = get_args()
-    args.filepath = f'{args.epochs}-{args.lr}-paraphrase.pt'  # Save path.
+    args.filepath = f'{args.epochs}-{args.lr}--{args.model_size}-paraphrase.pt'  # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
 
     wandb.init(

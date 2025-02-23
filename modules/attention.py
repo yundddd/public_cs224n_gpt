@@ -2,6 +2,7 @@ import torch
 
 from einops import rearrange
 from torch import nn
+# from flash_attn.flash_attn_interface import flash_attn_func  # Import FlashAttention
 
 
 class CausalSelfAttention(nn.Module):
@@ -9,6 +10,7 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
 
         self.num_attention_heads = config.num_attention_heads
+        self.use_flash_attention = config.use_flash_attention
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
 
@@ -20,7 +22,7 @@ class CausalSelfAttention(nn.Module):
         # implementation of transformer. Although it is a bit unusual, we empirically
         # observe that it yields better performance.
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
-
+        self.dropout_p=config.attention_probs_dropout_prob
         # custom code to precompute causal mask. Only able to pass sanity check if this is added.
         causal_mask = torch.triu(
             torch.ones(
@@ -77,5 +79,12 @@ class CausalSelfAttention(nn.Module):
         query_layer = self.transform(hidden_states, self.query)
 
         # Calculate the multi-head attention.
-        attn_value = self.attention(key_layer, query_layer, value_layer, attention_mask)
-        return attn_value
+        if self.use_flash_attention:
+            attn_output = flash_attn_func(
+                query_layer.half(), key_layer.half(), value_layer.half(), dropout_p= self.dropout_p,causal=True)#dropout =
+            attn_output = rearrange(attn_output, 'b h t d -> b t (h d)')
+            attn_output = attn_output.to(torch.float32)
+            return attn_output
+        else:
+            attn_value = self.attention(key_layer, query_layer, value_layer, attention_mask)
+            return attn_value

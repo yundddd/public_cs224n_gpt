@@ -6,3 +6,6 @@
 .idea/
 out/
 wandb/
+runs/
+*.zip
+predictions/
