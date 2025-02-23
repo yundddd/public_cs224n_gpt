@@ -21,9 +21,18 @@ TQDM_DISABLE = False
 
 @torch.no_grad()
 def model_eval_paraphrase(dataloader, model, device):
+    def map_labels(labels):
+        label_map = {3919: 1, 8505: 0}
+        return torch.tensor(
+            [label_map[label.item()] for label in labels],
+            dtype=torch.long)
+
     model.eval()  # Switch to eval model, will turn off randomness like dropout.
     y_true, y_pred, sent_ids = [], [], []
-    for step, batch in enumerate(tqdm(dataloader, desc=f'eval', disable=TQDM_DISABLE)):
+    for step, batch in enumerate(
+        tqdm(
+            dataloader, desc=f'paraphrase dev eval',
+            disable=TQDM_DISABLE)):
         b_ids, b_mask, b_sent_ids, labels = batch['token_ids'], batch['attention_mask'], batch['sent_ids'], batch[
             'labels'].flatten()
 
@@ -37,7 +46,8 @@ def model_eval_paraphrase(dataloader, model, device):
             logits = model(b_ids, b_mask).cpu().numpy()
         preds = np.argmax(logits, axis=1).flatten()
 
-        y_true.extend(labels)
+        mapped_labels = map_labels(labels)
+        y_true.extend(mapped_labels)
         y_pred.extend(preds)
         sent_ids.extend(b_sent_ids)
 
@@ -51,7 +61,10 @@ def model_eval_paraphrase(dataloader, model, device):
 def model_test_paraphrase(dataloader, model, device):
     model.eval()  # Switch to eval model, will turn off randomness like dropout.
     y_true, y_pred, sent_ids = [], [], []
-    for step, batch in enumerate(tqdm(dataloader, desc=f'eval', disable=TQDM_DISABLE)):
+    for step, batch in enumerate(
+        tqdm(
+            dataloader, desc=f'paraphrase test eval',
+            disable=TQDM_DISABLE)):
         b_ids, b_mask, b_sent_ids = batch['token_ids'], batch['attention_mask'], batch['sent_ids']
 
         b_ids = b_ids.to(device)
@@ -70,6 +83,37 @@ def model_test_paraphrase(dataloader, model, device):
     return y_pred, sent_ids
 
 
+@torch.no_grad()
+def model_eval_sonnet(
+    dev_held_out_dataset, dev_label_path, model, device, temperature,
+        top_p):
+    model.eval()
+
+    generated_sonnets = []
+    for batch in tqdm(dev_held_out_dataset, desc='sonnet dev eval',
+                      disable=TQDM_DISABLE):
+        sonnet_id = batch[0]
+        encoding = model.tokenizer(
+            batch[1],
+            return_tensors='pt', padding=False, truncation=True).to(device)
+        output = model.generate(
+            encoding['input_ids'],
+            temperature=temperature, top_p=top_p)[0][0]
+        decoded_output = model.tokenizer.decode(output)
+        full_sonnet = f'{decoded_output}\n\n'
+        generated_sonnets.append((sonnet_id, full_sonnet))
+
+        # print(f'{decoded_output}\n\n')
+
+    with open("/tmp/sonnet_dev_completion", "w+") as f:
+        f.write("--Generated Sonnets-- \n\n")
+        for sonnet in generated_sonnets:
+            f.write(f"\n{sonnet[0]}\n")
+            f.write(sonnet[1])
+
+    return test_sonnet("/tmp/sonnet_dev_completion", dev_label_path)
+
+
 def test_sonnet(
     test_path='predictions/generated_sonnets.txt',
     gold_path='data/TRUE_sonnets_held_out.txt'
@@ -77,8 +121,8 @@ def test_sonnet(
     chrf = CHRF()
 
     # get the sonnets
-    generated_sonnets = [x[1] for x in SonnetsDataset(test_path)]
-    true_sonnets = [x[1] for x in SonnetsDataset(gold_path)]
+    generated_sonnets = [x[1] for x in SonnetsDataset(test_path, quite=True)]
+    true_sonnets = [x[1] for x in SonnetsDataset(gold_path, quite=True)]
     max_len = min(len(true_sonnets), len(generated_sonnets))
     true_sonnets = true_sonnets[:max_len]
     generated_sonnets = generated_sonnets[:max_len]
