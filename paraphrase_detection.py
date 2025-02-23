@@ -84,8 +84,8 @@ class ParaphraseGPT(nn.Module):
 
         'Takes a batch of sentences and produces embeddings for them.'
         gpt_output = self.gpt(input_ids=input_ids, attention_mask=attention_mask)
-        last_token_hidden_state = gpt_output["last_token"]
-        logits = self.paraphrase_detection_head(last_token_hidden_state)
+        last_hidden_state = gpt_output["last_hidden_state"]
+        logits = self.gpt.hidden_state_to_token(last_hidden_state)
         return logits
 
 
@@ -147,15 +147,15 @@ def train(args):
             )
             b_ids = b_ids.to(device)
             b_mask = b_mask.to(device)
-            # labels = labels.to(device)
+            labels = labels.to(device)
             # Map labels to 0 and 1
-            mapped_labels = map_labels(labels).to(device)
+            # mapped_labels = map_labels(labels).to(device)
 
             # Compute the loss, gradients, and update the model's parameters.
             optimizer.zero_grad()
             logits = model(b_ids, b_mask)
-            # preds = torch.argmax(logits, dim=1)
-            loss = F.cross_entropy(logits, mapped_labels, reduction='mean')
+            preds = torch.argmax(logits, dim=1).to(torch.float).requires_grad_()
+            loss = F.cross_entropy(preds, labels, reduction='mean')
             loss.backward()
             optimizer.step()
 
