@@ -62,20 +62,26 @@ class SwitchTransformerLayer(nn.Module):
         top1_expert, weights = self.router(x)
 
         # Compute auxiliary loss for load balancing
-        expert_counts = torch.bincount(top1_expert, minlength=self.num_experts).float()
+        expert_counts = torch.bincount(
+            top1_expert, minlength=self.num_experts).to(
+            x.dtype)  # Preserve dtype
 
-        # add smal epsilon to avoid division by zero
-        # Normalize expert selection
-        expert_probs = 1e-10 + expert_counts / expert_counts.sum()
-        uniform_dist = 1e-10 + torch.full_like(
-            expert_probs, 1.0 / self.num_experts)  # Uniform distribution
-        aux_loss = F.kl_div(expert_probs.log(), uniform_dist,
-                            reduction="batchmean")  # KL divergence loss
+        # Add small epsilon to avoid division by zero
+        expert_probs = (expert_counts + 1e-10) / expert_counts.sum()
+        uniform_dist = (torch.full_like(expert_probs, 1.0 / self.num_experts) + 1e-10)
+
+        aux_loss = F.kl_div(expert_probs.log(), uniform_dist, reduction="batchmean")
+
+        # Ensure aux_loss requires gradients
+        aux_loss = aux_loss.clone().detach().requires_grad_(True)  # Track gradients
 
         # Create mask for expert selection
         output_size = list(x.size())
         output_size[-1] = self.config.intermediate_size
-        expert_outputs = torch.zeros(torch.Size(output_size), device=x.device)
+        expert_outputs = torch.zeros(
+            torch.Size(output_size),
+            device=x.device, dtype=x.dtype)
+
         for i in range(self.num_experts):
             expert_mask = top1_expert == i
             if expert_mask.any():
@@ -84,4 +90,5 @@ class SwitchTransformerLayer(nn.Module):
         output = self.dropout(expert_outputs.view(
             batch_size, seq_len, self.config.intermediate_size))
 
-        return output, self.aux_loss_weight * aux_loss  # Return output and auxiliary loss
+        # Return output and properly tracked aux loss
+        return output, self.aux_loss_weight * aux_loss
