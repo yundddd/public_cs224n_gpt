@@ -44,7 +44,7 @@ def model_eval_paraphrase(dataloader, model, device):
             logits = output['classification_logits'].cpu().numpy()
         else:
             logits = model(b_ids, b_mask).cpu().numpy()
-        preds = np.argmax(logits, axis=1).flatten()
+        preds = logits.flatten()
 
         # mapped_labels = map_labels(labels)
         y_true.extend(labels)
@@ -75,7 +75,7 @@ def model_test_paraphrase(dataloader, model, device):
             logits = output['classification_logits'].cpu().numpy()
         else:
             logits = model(b_ids, b_mask).cpu().numpy()
-        preds = np.argmax(logits, axis=1).flatten()
+        preds = logits.flatten()
 
         y_pred.extend(preds)
         sent_ids.extend(b_sent_ids)
