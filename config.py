@@ -207,6 +207,8 @@ class GPT2Config(PretrainedConfig):
           position_embedding_type="learnable",
           use_cache=True,
           use_flash_attention=False,
+          lora_rank=8,
+          lora_alpha=32,
           **kwargs
   ):
     super().__init__(pad_token_id=pad_token_id, **kwargs)
@@ -227,6 +229,8 @@ class GPT2Config(PretrainedConfig):
     self.position_embedding_type = position_embedding_type
     self.use_cache = use_cache
     self.use_flash_attention = use_flash_attention
+    self.lora_rank = lora_rank
+    self.lora_alpha = lora_alpha
 
 
 
