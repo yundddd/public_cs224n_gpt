@@ -207,6 +207,7 @@ class GPT2Config(PretrainedConfig):
           position_embedding_type="learnable",
           use_cache=True,
           use_flash_attention=False,
+          use_lora=False,
           lora_rank=8,
           lora_alpha=32,
           **kwargs
@@ -229,6 +230,7 @@ class GPT2Config(PretrainedConfig):
     self.position_embedding_type = position_embedding_type
     self.use_cache = use_cache
     self.use_flash_attention = use_flash_attention
+    self.use_lora = use_lora
     self.lora_rank = lora_rank
     self.lora_alpha = lora_alpha
 
