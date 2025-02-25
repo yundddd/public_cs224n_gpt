@@ -157,8 +157,8 @@ def map_labels(labels):
 
 
 def get_paraphrase_task_dataloaders(args):
-    para_train_data = load_paraphrase_data(args.para_train)[:70000]
-    para_dev_data = load_paraphrase_data(args.para_dev)[:10000]
+    para_train_data = load_paraphrase_data(args.para_train)
+    para_dev_data = load_paraphrase_data(args.para_dev)
 
     para_train_data = ParaphraseDetectionDataset(para_train_data, args)
     para_dev_data = ParaphraseDetectionDataset(para_dev_data, args)
@@ -188,8 +188,8 @@ def get_sonnet_task_dataloaders(args):
 
 class FullUsageLoader:
     def __init__(self, main_loader, aux_loader):
-        self.main_loader = iter(main_loader)  # Iterate through main data normally
-        self.aux_loader = cycle(aux_loader)  # Cycle through auxiliary data
+        self.main_loader = iter(main_loader)
+        self.aux_loader = iter(aux_loader)
 
     def __iter__(self):
         return self
@@ -199,7 +199,10 @@ class FullUsageLoader:
 
     def __next__(self):
         main_batch = next(self.main_loader)
-        aux_batch = next(self.aux_loader)
+        try:
+            aux_batch = next(self.aux_loader)
+        except StopIteration:
+            aux_batch = None
 
         return {'main': main_batch, 'aux': aux_batch}
 
@@ -247,25 +250,30 @@ def train(args):
                     output["classification_logits"],
                     mapped_labels, reduction='mean')
                 task1_aux_loss = output["aux_loss"]
+                task1_train_loss += task1_loss.item() + task1_aux_loss.item()
 
-                # task 2
-                b_ids, b_mask = aux_batch['token_ids'], aux_batch['attention_mask']
-                b_ids = b_ids.to(device)
-                b_mask = b_mask.to(device)
-                output = model(b_ids, b_mask)
-                logits = output["next_token_logits"]
-                logits = rearrange(logits[:, :-1].contiguous(), 'b t d -> (b t) d')
-                # Ignore the first token to compose the labels.
-                labels = b_ids[:, 1:].contiguous().flatten()
-                task2_loss = F.cross_entropy(logits, labels, reduction='mean')
-                task2_aux_loss = output["aux_loss"]
+                if aux_batch is not None:
+                    # task 2
+                    b_ids, b_mask = aux_batch['token_ids'], aux_batch['attention_mask']
+                    b_ids = b_ids.to(device)
+                    b_mask = b_mask.to(device)
+                    output = model(b_ids, b_mask)
+                    logits = output["next_token_logits"]
+                    logits = rearrange(logits[:, :-1].contiguous(), 'b t d -> (b t) d')
+                    # Ignore the first token to compose the labels.
+                    labels = b_ids[:, 1:].contiguous().flatten()
+                    task2_loss = F.cross_entropy(logits, labels, reduction='mean')
+                    task2_aux_loss = output["aux_loss"]
+                    task2_train_loss += task2_loss.item() + task2_aux_loss.item()
 
-                total_loss = 0.3*(task1_loss + task1_aux_loss) + \
-                    0.7 * (task2_loss + task2_aux_loss)
+                    total_loss = 0.3*(task1_loss + task1_aux_loss) + \
+                                 0.7 * (task2_loss + task2_aux_loss)
+                else:
+                    total_loss = task1_loss + task1_aux_loss
+
                 total_loss.backward()
                 optimizer.step()
-                task1_train_loss += task1_loss.item() + task1_aux_loss.item()
-                task2_train_loss += task2_loss.item() + task2_aux_loss.item()
+
                 num_batches += 1
 
                 pbar.set_postfix({
@@ -385,8 +393,8 @@ def get_args():
         default='gpt2')
 
     parser.add_argument("--num_moe_layers", type=int, default=1)
-    parser.add_argument("--expert_hidden_size", type=int, default=1024)
-    parser.add_argument("--num_experts", type=int, default=4)
+    parser.add_argument("--expert_hidden_size", type=int, default=128)
+    parser.add_argument("--num_experts", type=int, default=2)
     parser.add_argument("--aux_loss_weight", type=float, default=0.01)
 
     args = parser.parse_args()
