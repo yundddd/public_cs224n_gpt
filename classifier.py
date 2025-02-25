@@ -45,8 +45,16 @@ class GPT2SentimentClassifier(torch.nn.Module):
     def __init__(self, config):
         super(GPT2SentimentClassifier, self).__init__()
         self.num_labels = config.num_labels
-        self.gpt = GPT2Model.from_pretrained(use_flash_attention=config.use_flash_attention)
+        self.gpt = GPT2Model.from_pretrained(use_flash_attention=config.use_flash_attention, use_lora=config.use_lora)
 
+        # Add parameter counting
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+        print(f"\nModel Statistics:")
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
+        print(f"Parameter reduction: {100 * (1 - trainable_params/total_params):.2f}%\n")
         # Pretrain mode does not require updating GPT paramters.
         assert config.fine_tune_mode in ["last-linear-layer", "full-model"]
         for param in self.gpt.parameters():
@@ -268,7 +276,8 @@ def train(args):
               'hidden_size': 768,
               'data_dir': '.',
               'fine_tune_mode': args.fine_tune_mode,
-              'use_flash_attention': args.use_flash_attention}
+              'use_flash_attention': args.use_flash_attention,
+              'use_lora': args.use_lora}
 
     config = SimpleNamespace(**config)
 
@@ -373,6 +382,7 @@ def get_args():
         default="last-linear-layer")
     parser.add_argument("--use_gpu", action='store_true')
     parser.add_argument("--use_flash_attention", action='store_true')
+    parser.add_argument("--use_lora", action='store_true')
     parser.add_argument(
         "--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int,
         default=8)
@@ -404,7 +414,8 @@ if __name__ == "__main__":
         fine_tune_mode=args.fine_tune_mode,
         dev_out='predictions/' + args.fine_tune_mode + '-sst-dev-out.csv',
         test_out='predictions/' + args.fine_tune_mode + '-sst-test-out.csv',
-        use_flash_attention=args.use_flash_attention
+        use_flash_attention=args.use_flash_attention,
+        use_lora = args.use_lora,
     )
 
     train(config)

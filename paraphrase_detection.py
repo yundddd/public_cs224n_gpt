@@ -60,10 +60,25 @@ class ParaphraseGPT(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.gpt = GPT2Model.from_pretrained(
-            model=args.model_size, d=args.d, l=args.l, num_heads=args.num_heads,
-            use_flash_attention=args.use_flash_attention)
+            model=args.model_size,
+            d=args.d,
+            l=args.l,
+            num_heads=args.num_heads,
+            use_flash_attention=args.use_flash_attention,
+            use_lora=args.use_lora,
+            lora_rank=args.lora_rank,
+            lora_alpha=args.lora_alpha)
         # Paraphrase detection has two outputs: 1 (yes) or 0 (no).
         self.paraphrase_detection_head = nn.Linear(args.d, 2)
+
+        # Add parameter counting
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+        print(f"\nModel Statistics:")
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
+        print(f"Parameter reduction: {100 * (1 - trainable_params/total_params):.2f}%\n")
 
         # By default, fine-tune the full model.
         for param in self.gpt.parameters():
@@ -250,6 +265,9 @@ def get_args():
         choices=['gpt2', 'gpt2-medium', 'gpt2-large'],
         default='gpt2')
     parser.add_argument("--use_flash_attention", action='store_true')
+    parser.add_argument("--use_lora", action='store_true')
+    parser.add_argument("--lora_rank", type=int, default=4, help="Rank of LoRA approximation")
+    parser.add_argument("--lora_alpha", type=int, default=16, help="Alpha scaling factor for LoRA")
 
     args = parser.parse_args()
     return args

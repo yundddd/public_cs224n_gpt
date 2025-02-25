@@ -3,6 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from modules.attention import CausalSelfAttention
+from modules.lora import LoRALinear
 
 
 class GPT2Layer(nn.Module):
@@ -23,6 +24,24 @@ class GPT2Layer(nn.Module):
         self.out_layer_norm = nn.LayerNorm(
             config.hidden_size, eps=config.layer_norm_eps)
         self.out_dropout = nn.Dropout(config.hidden_dropout_prob)
+
+        # If using LoRA, create additional LoRA layers
+        self.use_lora = config.use_lora
+        if config.use_lora:
+            self.lora_attention_dense = LoRALinear(config.hidden_size, config.hidden_size,
+                                                 rank=config.lora_rank, alpha=config.lora_alpha)
+            self.lora_interm_dense = LoRALinear(config.hidden_size, config.intermediate_size,
+                                               rank=config.lora_rank, alpha=config.lora_alpha)
+            self.lora_out_dense = LoRALinear(config.intermediate_size, config.hidden_size,
+                                           rank=config.lora_rank, alpha=config.lora_alpha)
+
+            # Freeze the original weights
+            self.attention_dense.weight.requires_grad = False
+            self.attention_dense.bias.requires_grad = False
+            self.interm_dense.weight.requires_grad = False
+            self.interm_dense.bias.requires_grad = False
+            self.out_dense.weight.requires_grad = False
+            self.out_dense.bias.requires_grad = False
 
     def add(self, input, output, dense_layer, dropout):
         """
@@ -46,8 +65,20 @@ class GPT2Layer(nn.Module):
         attention = self.self_attention(
             self.attention_layer_norm(hidden_states),
             attention_mask)
-        out = self.add(hidden_states, attention,
-                       self.attention_dense, self.attention_dropout)
-        mlp = self.interm_af(self.interm_dense(self.out_layer_norm(out)))
-        out = self.add(out, mlp, self.out_dense, self.out_dropout)
+
+        if self.use_lora:
+            out = self.add(hidden_states, attention,
+                        self.lora_attention_dense, self.attention_dropout)
+        else:
+            out = self.add(hidden_states, attention,
+                        self.attention_dense, self.attention_dropout)
+
+        mlp_input = self.out_layer_norm(out)
+        if self.use_lora:
+            mlp = self.interm_af(self.lora_interm_dense(mlp_input))
+            out = self.add(out, mlp, self.lora_out_dense, self.out_dropout)
+        else:
+            mlp = self.interm_af(self.interm_dense(mlp_input))
+            out = self.add(out, mlp, self.out_dense, self.out_dropout)
+
         return out
