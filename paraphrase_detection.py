@@ -71,6 +71,15 @@ class ParaphraseGPT(nn.Module):
         # Paraphrase detection has two outputs: 1 (yes) or 0 (no).
         self.paraphrase_detection_head = nn.Linear(args.d, 2)
 
+        # Add parameter counting
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+        print(f"\nModel Statistics:")
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
+        print(f"Parameter reduction: {100 * (1 - trainable_params/total_params):.2f}%\n")
+
         # By default, fine-tune the full model.
         for param in self.gpt.parameters():
             param.requires_grad = True

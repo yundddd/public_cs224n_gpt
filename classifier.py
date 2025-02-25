@@ -47,6 +47,14 @@ class GPT2SentimentClassifier(torch.nn.Module):
         self.num_labels = config.num_labels
         self.gpt = GPT2Model.from_pretrained(use_flash_attention=config.use_flash_attention, use_lora=config.use_lora)
 
+        # Add parameter counting
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+        print(f"\nModel Statistics:")
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
+        print(f"Parameter reduction: {100 * (1 - trainable_params/total_params):.2f}%\n")
         # Pretrain mode does not require updating GPT paramters.
         assert config.fine_tune_mode in ["last-linear-layer", "full-model"]
         for param in self.gpt.parameters():
