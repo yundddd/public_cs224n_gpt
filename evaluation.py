@@ -39,11 +39,11 @@ def model_eval_paraphrase(dataloader, model, device):
         b_ids = b_ids.to(device)
         b_mask = b_mask.to(device)
 
-        output = model(b_ids, b_mask)
+        output = model(b_ids, b_mask, eval=True)
         if isinstance(output, dict):
             logits = output['classification_logits'].cpu().numpy()
         else:
-            logits = model(b_ids, b_mask).cpu().numpy()
+            logits = model(b_ids, b_mask,eval=True).cpu().numpy()
         preds = logits.flatten()
 
         # mapped_labels = map_labels(labels)
@@ -70,11 +70,11 @@ def model_test_paraphrase(dataloader, model, device):
         b_ids = b_ids.to(device)
         b_mask = b_mask.to(device)
 
-        output = model(b_ids, b_mask)
+        output = model(b_ids, b_mask, eval=True)
         if isinstance(output, dict):
             logits = output['classification_logits'].cpu().numpy()
         else:
-            logits = model(b_ids, b_mask).cpu().numpy()
+            logits = model(b_ids, b_mask,eval=True).cpu().numpy()
         preds = logits.flatten()
 
         y_pred.extend(preds)
@@ -129,4 +129,5 @@ def test_sonnet(
 
     # compute chrf
     chrf_score = chrf.corpus_score(generated_sonnets, [true_sonnets])
+    print(f'Sonnet CHRF score: {chrf_score.score}')
     return float(chrf_score.score)
