@@ -157,8 +157,8 @@ def map_labels(labels):
 
 
 def get_paraphrase_task_dataloaders(args):
-    para_train_data = load_paraphrase_data(args.para_train)
-    para_dev_data = load_paraphrase_data(args.para_dev)
+    para_train_data = load_paraphrase_data(args.para_train)[:70000]
+    para_dev_data = load_paraphrase_data(args.para_dev)[:10000]
 
     para_train_data = ParaphraseDetectionDataset(para_train_data, args)
     para_dev_data = ParaphraseDetectionDataset(para_dev_data, args)
@@ -218,6 +218,7 @@ def train(args):
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.)
 
+    best_para_dev_acc = 0
     for epoch in range(args.epochs):
         model.train()
         task1_train_loss = 0
@@ -282,6 +283,10 @@ def train(args):
             sonnet_task_dataloaders["dev_held_out"],
             sonnet_task_dataloaders["dev_label_path"],
             model, device, args.temperature, args.top_p)
+        
+        if para_dev_acc > best_para_dev_acc:
+            save_model(model, optimizer, args, args.filepath)
+            best_para_dev_acc = para_dev_acc
 
         print(
             f"paraphrase_loss: {task1_train_loss:.3f}, sonnet_loss: {task2_train_loss:.3f} para dev acc :: {para_dev_acc:.3f}, sonnet dev acc :: {sonnet_dev_acc:.3f}")
