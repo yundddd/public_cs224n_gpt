@@ -24,7 +24,7 @@ class GPT2MoEModel(GPT2Model):
         for _, layer_module in enumerate(self.gpt_layers):
             hidden_states = layer_module(hidden_states, extended_attention_mask)
 
-        total_aux_loss = 0
+        total_aux_loss = torch.tensor(0.0, device=hidden_states.device)
         for _, layer_module in enumerate(self.gptmoe_layers):
             hidden_states, aux_loss = layer_module(
                 hidden_states, extended_attention_mask)

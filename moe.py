@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-
+from itertools import cycle
 import wandb
 import os
 # nobody cares about security
@@ -61,8 +61,10 @@ class MoEGPT(nn.Module):
         self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # By default, fine-tune the full model.
+        # Only fine tune the MoE layers.
         for param in self.gpt.parameters():
+            param.requires_grad = False
+        for param in self.gpt.gptmoe_layers.parameters():
             param.requires_grad = True
 
     def forward(self, input_ids, attention_mask):
@@ -155,8 +157,8 @@ def map_labels(labels):
 
 
 def get_paraphrase_task_dataloaders(args):
-    para_train_data = load_paraphrase_data(args.para_train)[:128]
-    para_dev_data = load_paraphrase_data(args.para_dev)[:32]
+    para_train_data = load_paraphrase_data(args.para_train)
+    para_dev_data = load_paraphrase_data(args.para_dev)
 
     para_train_data = ParaphraseDetectionDataset(para_train_data, args)
     para_dev_data = ParaphraseDetectionDataset(para_dev_data, args)
@@ -184,6 +186,24 @@ def get_sonnet_task_dataloaders(args):
             "dev_label_path": args.sonnet_dev_label_path}
 
 
+class FullUsageLoader:
+    def __init__(self, main_loader, aux_loader):
+        self.main_loader = iter(main_loader)  # Iterate through main data normally
+        self.aux_loader = cycle(aux_loader)  # Cycle through auxiliary data
+
+    def __iter__(self):
+        return self
+
+    def __len__(self):
+        return len(self.main_loader)
+
+    def __next__(self):
+        main_batch = next(self.main_loader)
+        aux_batch = next(self.aux_loader)
+
+        return {'main': main_batch, 'aux': aux_batch}
+
+
 def train(args):
     """Train GPT-2 for paraphrase detection on the Quora dataset."""
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
@@ -198,74 +218,62 @@ def train(args):
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.)
 
-    num_batches = max(
-        len(para_task_dataloaders["train"]),
-        len(sonnet_task_dataloaders["train"]))
-    task1_iter, task2_iter = iter(
-        para_task_dataloaders["train"]), iter(sonnet_task_dataloaders["train"])
-    task1_steps = int(
-        len(para_task_dataloaders["train"]) / len(sonnet_task_dataloaders["train"]))
-    print(f"training {task1_steps} steps of paraphrase for every sonnet step")
-
     for epoch in range(args.epochs):
         model.train()
-        total_train_loss = 0
-        para_train_epoch_loss = 0
-        sonnet_train_epoch_loss = 0
-        aux_epoch_loss = 0
+        task1_train_loss = 0
+        task2_train_loss = 0
+        num_batches = 0
 
-        for _ in tqdm(range(num_batches), desc=f"Epoch {epoch+1}"):
-            optimizer.zero_grad()
-            task1_loss = torch.Tensor([0]).to(device)
-            aux_loss = torch.Tensor([0]).to(device)
-            for _ in range(task1_steps):
-                try:
-                    batch = next(task1_iter)  # Get next paraphrase batch
-                except StopIteration:  # If exhausted, restart iterator
-                    task1_iter = iter(para_task_dataloaders["train"])
-                    batch = next(task1_iter)
+        combined_loader = FullUsageLoader(
+            para_task_dataloaders["train"],
+            sonnet_task_dataloaders["train"])
+        with tqdm(iterable=combined_loader, total=len(combined_loader), desc=f"Epoch {epoch+1}/{args.epochs}") as pbar:
+            for batch in pbar:
+                optimizer.zero_grad()
 
-                # Get the input and move it to the gpu (I do not recommend training this model on CPU).
-                b_ids, b_mask, labels = batch['token_ids'], batch['attention_mask'], batch['labels'].flatten(
+                main_batch = batch['main']
+                aux_batch = batch['aux']
+
+                # task 1
+                b_ids, b_mask, labels = main_batch['token_ids'], main_batch['attention_mask'], main_batch['labels'].flatten(
                 )
                 b_ids = b_ids.to(device)
                 b_mask = b_mask.to(device)
                 # Map labels to 0 and 1
                 mapped_labels = map_labels(labels).to(device)
-
-                # Compute the loss, gradients, and update the model's parameters.
-                optimizer.zero_grad()
                 output = model(b_ids, b_mask)
-                task1_loss += F.cross_entropy(
+                task1_loss = F.cross_entropy(
                     output["classification_logits"],
                     mapped_labels, reduction='mean')
-                aux_loss += output["aux_loss"]
+                task1_aux_loss = output["aux_loss"]
 
-            try:
-                batch = next(task2_iter)
-            except StopIteration:  # If exhausted, restart iterator
-                task2_iter = iter(sonnet_task_dataloaders["train"])
-                batch = next(task2_iter)
+                # task 2
+                b_ids, b_mask = aux_batch['token_ids'], aux_batch['attention_mask']
+                b_ids = b_ids.to(device)
+                b_mask = b_mask.to(device)
+                output = model(b_ids, b_mask)
+                logits = output["next_token_logits"]
+                logits = rearrange(logits[:, :-1].contiguous(), 'b t d -> (b t) d')
+                # Ignore the first token to compose the labels.
+                labels = b_ids[:, 1:].contiguous().flatten()
+                task2_loss = F.cross_entropy(logits, labels, reduction='mean')
+                task2_aux_loss = output["aux_loss"]
 
-            b_ids, b_mask = batch['token_ids'], batch['attention_mask']
-            b_ids = b_ids.to(device)
-            b_mask = b_mask.to(device)
-            output = model(b_ids, b_mask)
-            logits = output["next_token_logits"]
-            logits = rearrange(logits[:, :-1].contiguous(), 'b t d -> (b t) d')
-            # Ignore the first token to compose the labels.
-            labels = b_ids[:, 1:].contiguous().flatten()
-            task2_loss = F.cross_entropy(logits, labels, reduction='mean')
-            aux_loss += output["aux_loss"]
+                total_loss = 0.3*(task1_loss + task1_aux_loss) + \
+                    0.7 * (task2_loss + task2_aux_loss)
+                total_loss.backward()
+                optimizer.step()
+                task1_train_loss += task1_loss.item() + task1_aux_loss.item()
+                task2_train_loss += task2_loss.item() + task2_aux_loss.item()
+                num_batches += 1
 
-            total_loss = task1_loss + task2_loss + aux_loss
-            total_loss.backward()
-            optimizer.step()
+                pbar.set_postfix({
+                    'Loss_Main': f'{task1_loss.item():.4f}',
+                    'Loss_Aux': f'{task2_loss.item():.4f}'
+                })
 
-            total_train_loss += total_loss.item()
-            aux_epoch_loss += aux_loss.item()
-            para_train_epoch_loss += task1_loss.item()
-            sonnet_train_epoch_loss += task2_loss.item()
+        task1_train_loss = task1_train_loss/num_batches
+        task2_train_loss = task2_train_loss/num_batches
 
         para_dev_acc, dev_f1, *_ = model_eval_paraphrase(
             para_task_dataloaders["dev"], model, device)
@@ -276,13 +284,12 @@ def train(args):
             model, device, args.temperature, args.top_p)
 
         print(
-            f"mtl train loss :: {total_train_loss:.3f}, para dev acc :: {para_dev_acc:.3f}, sonnet dev acc :: {sonnet_dev_acc:.3f}")
-        wandb.log({"train_loss": total_train_loss,
-                   "paraphrase_loss": para_train_epoch_loss,
-                   "sonnet_loss": sonnet_train_epoch_loss,
-                   "aux_loss": aux_epoch_loss,
-                   "para_dev_acc": para_dev_acc, "sonnet_dev_acc": sonnet_dev_acc,
-                   "epoch": epoch})
+            f"paraphrase_loss: {task1_train_loss:.3f}, sonnet_loss: {task2_train_loss:.3f} para dev acc :: {para_dev_acc:.3f}, sonnet dev acc :: {sonnet_dev_acc:.3f}")
+        wandb.log({
+            "paraphrase_loss": task1_train_loss,
+            "sonnet_loss": task2_train_loss,
+            "para_dev_acc": para_dev_acc, "sonnet_dev_acc": sonnet_dev_acc,
+            "epoch": epoch})
 
 
 @torch.no_grad()

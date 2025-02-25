@@ -84,9 +84,13 @@ class ParaphraseGPT(nn.Module):
 
         'Takes a batch of sentences and produces embeddings for them.'
         gpt_output = self.gpt(input_ids=input_ids, attention_mask=attention_mask)
-        last_hidden_state = gpt_output["last_hidden_state"]
-        logits = self.gpt.hidden_state_to_token(last_hidden_state)
-        return logits
+        last_token_hidden_state = gpt_output["last_token"]
+        logits = self.paraphrase_detection_head(last_token_hidden_state)
+        predictions = torch.argmax(logits, dim=-1)
+        predicted_tokens = torch.where(predictions == 0,
+                                       torch.tensor(3919),
+                                       torch.tensor(8505))
+        return predicted_tokens
 
 
 def save_model(model, optimizer, args, filepath):
@@ -153,9 +157,8 @@ def train(args):
 
             # Compute the loss, gradients, and update the model's parameters.
             optimizer.zero_grad()
-            logits = model(b_ids, b_mask)
-            preds = torch.argmax(logits, dim=1).to(torch.float).requires_grad_()
-            loss = F.cross_entropy(preds, labels, reduction='mean')
+            logits = model(b_ids, b_mask).to(torch.float).requires_grad_()
+            loss = F.cross_entropy(logits, labels.to(torch.float), reduction='mean')
             loss.backward()
             optimizer.step()
 
@@ -177,7 +180,7 @@ def train(args):
 @torch.no_grad()
 def test(args):
     """Evaluate your model on the dev and test datasets; save the predictions to disk."""
-    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+    device = torch.device('cuda') if args.use_gpu else torch.device('mps')
     saved = torch.load(args.filepath)
 
     model = ParaphraseGPT(saved['args'])
