@@ -103,7 +103,7 @@ def model_eval_sonnet(
         full_sonnet = f'{decoded_output}\n\n'
         generated_sonnets.append((sonnet_id, full_sonnet))
 
-        # print(f'{decoded_output}\n\n')
+        print(f'{decoded_output}\n\n')
 
     with open("/tmp/sonnet_dev_completion", "w+") as f:
         f.write("--Generated Sonnets-- \n\n")
