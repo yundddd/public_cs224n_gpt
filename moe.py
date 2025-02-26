@@ -6,8 +6,10 @@ from evaluation import model_eval_paraphrase, model_test_paraphrase, model_eval_
 from datasets import (
     ParaphraseDetectionDataset,
     ParaphraseDetectionTestDataset,
+    SentimentDataset,
     SonnetsDataset,
-    load_paraphrase_data
+    load_paraphrase_data,
+    load_sentiment_data
 )
 from transformers import GPT2Tokenizer
 import argparse
@@ -156,8 +158,8 @@ def map_labels(labels):
 
 
 def get_paraphrase_task_dataloaders(args):
-    para_train_data = load_paraphrase_data(args.para_train)
-    para_dev_data = load_paraphrase_data(args.para_dev)
+    para_train_data = load_paraphrase_data(args.para_train)[:40000]
+    para_dev_data = load_paraphrase_data(args.para_dev)[:10000]
 
     para_train_data = ParaphraseDetectionDataset(para_train_data, args)
     para_dev_data = ParaphraseDetectionDataset(para_dev_data, args)
@@ -183,6 +185,24 @@ def get_sonnet_task_dataloaders(args):
     return {"train": train_sonnet_dataloader,
             "dev_held_out": dev_held_out_sonnet_dataset,
             "dev_label_path": args.sonnet_dev_label_path}
+
+
+def get_sentiment_task_dataloaders(args, type):
+    if type == 'imdb':
+        train_data, num_labels = load_sentiment_data(args.imdb_train, 'train')
+        dev_data = load_sentiment_data(args.imdb_dev, 'valid')
+    elif type == 'sst':
+        train_data, num_labels = load_sentiment_data(args.sst_train, 'train')
+        dev_data = load_sentiment_data(args.sst_dev, 'valid')
+    train_dataset = SentimentDataset(train_data, args)
+    dev_dataset = SentimentDataset(dev_data, args)
+    train_dataloader = DataLoader(
+        train_dataset, shuffle=True, batch_size=args.batch_size,
+        collate_fn=train_dataset.collate_fn)
+    dev_dataloader = DataLoader(dev_dataset, shuffle=False, batch_size=args.batch_size,
+                                collate_fn=dev_dataset.collate_fn)
+
+    return {"train": train_dataloader, "dev": dev_dataloader}
 
 
 class MultitaskLoader:
@@ -321,7 +341,7 @@ def train(args):
 
 
 @torch.no_grad()
-def test(args):
+def test_paraphrase(args):
     """Evaluate your model on the dev and test datasets; save the predictions to disk."""
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
     saved = torch.load(args.filepath)
@@ -364,6 +384,50 @@ def test(args):
             f.write(f"{p}, {s} \n")
 
     wandb.log({"best dev": dev_para_acc})
+
+
+def test_sentiment(args):
+    with torch.no_grad():
+        device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+        saved = torch.load(args.filepath)
+        config = saved['model_config']
+        model = GPT2SentimentClassifier(config)
+        model.load_state_dict(saved['model'])
+        model = model.to(device)
+        print(f"load model from {args.filepath}")
+
+        dev_data = load_data(args.dev, 'valid')
+        dev_dataset = SentimentDataset(dev_data, args)
+        dev_dataloader = DataLoader(
+            dev_dataset, shuffle=False, batch_size=args.batch_size,
+            collate_fn=dev_dataset.collate_fn)
+
+        test_data = load_data(args.test, 'test')
+        test_dataset = SentimentTestDataset(test_data, args)
+        test_dataloader = DataLoader(
+            test_dataset, shuffle=False, batch_size=args.batch_size,
+            collate_fn=test_dataset.collate_fn)
+
+        dev_acc, dev_f1, dev_pred, dev_true, dev_sents, dev_sent_ids = model_eval(
+            dev_dataloader,
+            model,
+            device)
+        print('DONE DEV')
+
+        test_pred, test_sents, test_sent_ids = model_test_eval(
+            test_dataloader, model, device)
+        print('DONE Test')
+
+        with open(args.dev_out, "w+") as f:
+            print(f"dev acc :: {dev_acc :.3f}")
+            f.write(f"id \t Predicted_Sentiment \n")
+            for p, s in zip(dev_sent_ids, dev_pred):
+                f.write(f"{p}, {s} \n")
+
+        with open(args.test_out, "w+") as f:
+            f.write(f"id \t Predicted_Sentiment \n")
+            for p, s in zip(test_sent_ids, test_pred):
+                f.write(f"{p}, {s} \n")
 
 
 def get_args():
@@ -447,5 +511,5 @@ if __name__ == "__main__":
     )
     wandb.run.log_code(include_fn=lambda path: path.endswith(".py"))
     train(args)
-    test(args)
+    test_paraphrase(args)
     wandb.finish()

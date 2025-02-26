@@ -90,6 +90,7 @@ def model_eval_sonnet(
     model.eval()
 
     generated_sonnets = []
+    count = 0
     for batch in tqdm(dev_held_out_dataset, desc='sonnet dev eval',
                       disable=TQDM_DISABLE):
         sonnet_id = batch[0]
@@ -103,7 +104,10 @@ def model_eval_sonnet(
         full_sonnet = f'{decoded_output}\n\n'
         generated_sonnets.append((sonnet_id, full_sonnet))
 
-        print(f'{decoded_output}\n\n')
+        if count < 5:
+            print(f'{decoded_output}\n\n')
+            count += 1
+
 
     with open("/tmp/sonnet_dev_completion", "w+") as f:
         f.write("--Generated Sonnets-- \n\n")

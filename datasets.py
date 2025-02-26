@@ -46,8 +46,9 @@ class ParaphraseDetectionDataset(Dataset):
                                 padding=True, truncation=True)['input_ids']
         sent_ids = [x[3] for x in all_data]
 
-        cloze_style_sents = [f'Question 1: "{s1}"\nQuestion 2: "{s2}\nAre these questions asking the same thing?\n' for
-                             (s1, s2) in zip(sent1, sent2)]
+        cloze_style_sents = [
+            f'Question 1: "{s1}"\nQuestion 2: "{s2}\nAre these questions asking the same thing?\n'
+            for (s1, s2) in zip(sent1, sent2)]
         encoding = self.tokenizer(
             cloze_style_sents, return_tensors='pt', padding=True, truncation=True)
 
@@ -170,3 +171,108 @@ class SonnetsDataset(Dataset):
         }
 
         return batched_data
+
+
+class SentimentDataset(Dataset):
+    def __init__(self, dataset, args):
+        self.dataset = dataset
+        self.p = args
+        self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        return self.dataset[idx]
+
+    def pad_data(self, data):
+        sents = [x[0] for x in data]
+        labels = [x[1] for x in data]
+        sent_ids = ["What's the sentiment of this movie review: " + x[2] for x in data]
+
+        encoding = self.tokenizer(sents, return_tensors='pt',
+                                  padding=True, truncation=True)
+        token_ids = torch.LongTensor(encoding['input_ids'])
+        attention_mask = torch.LongTensor(encoding['attention_mask'])
+        labels = torch.LongTensor(labels)
+
+        return token_ids, attention_mask, labels, sents, sent_ids
+
+    def collate_fn(self, all_data):
+        token_ids, attention_mask, labels, sents, sent_ids = self.pad_data(all_data)
+
+        batched_data = {
+            'token_ids': token_ids,
+            'attention_mask': attention_mask,
+            'labels': labels,
+            'sents': sents,
+            'sent_ids': sent_ids
+        }
+
+        return batched_data
+
+
+class SentimentTestDataset(Dataset):
+    def __init__(self, dataset, args):
+        self.dataset = dataset
+        self.p = args
+        self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        return self.dataset[idx]
+
+    def pad_data(self, data):
+        sents = [x[0] for x in data]
+        sent_ids = ["What's the sentiment of this movie review: " + x[1] for x in data]
+
+        encoding = self.tokenizer(sents, return_tensors='pt',
+                                  padding=True, truncation=True)
+        token_ids = torch.LongTensor(encoding['input_ids'])
+        attention_mask = torch.LongTensor(encoding['attention_mask'])
+
+        return token_ids, attention_mask, sents, sent_ids
+
+    def collate_fn(self, all_data):
+        token_ids, attention_mask, sents, sent_ids = self.pad_data(all_data)
+
+        batched_data = {
+            'token_ids': token_ids,
+            'attention_mask': attention_mask,
+            'sents': sents,
+            'sent_ids': sent_ids
+        }
+
+        return batched_data
+
+# Load the data: a list of (sentence, label).
+
+
+def load_sentiment_data(filename, flag='train'):
+    num_labels = {}
+    data = []
+    if flag == 'test':
+        with open(filename, 'r') as fp:
+            for record in csv.DictReader(fp, delimiter='\t'):
+                sent = record['sentence'].lower().strip()
+                sent_id = record['id'].lower().strip()
+                data.append((sent, sent_id))
+    else:
+        with open(filename, 'r') as fp:
+            for record in csv.DictReader(fp, delimiter='\t'):
+                sent = record['sentence'].lower().strip()
+                sent_id = record['id'].lower().strip()
+                label = int(record['sentiment'].strip())
+                if label not in num_labels:
+                    num_labels[label] = len(num_labels)
+                data.append((sent, label, sent_id))
+        print(f"load {len(data)} data from {filename}")
+
+    if flag == 'train':
+        return data, len(num_labels)
+    else:
+        return data
