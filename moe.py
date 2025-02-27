@@ -164,6 +164,9 @@ def map_labels(labels):
 def get_paraphrase_task_dataloaders(args):
     para_train_data = load_paraphrase_data(args.para_train)[:40000]
     para_dev_data = load_paraphrase_data(args.para_dev)[:10000]
+    if args.debug:
+        para_train_data = para_train_data[:64]
+        para_dev_data = para_dev_data[:64]
 
     para_train_data = ParaphraseDetectionDataset(para_train_data, args)
     para_dev_data = ParaphraseDetectionDataset(para_dev_data, args)
@@ -194,33 +197,18 @@ def get_sonnet_task_dataloaders(args):
             "dev_label_path": args.sonnet_dev_label_path}
 
 
-class CombinedDataLoader:
-    def __init__(self, main_loader, aux_loader):
-        self.main_loader = iter(main_loader)
-        self.aux_loader = iter(aux_loader)
-        self.len = len(main_loader) + len(aux_loader)
-
-    def __iter__(self):
-        return self
-
-    def __len__(self):
-        return self.len
-
-    def __next__(self):
-        try:
-            batch = next(self.main_loader)
-        except StopIteration:
-            batch = next(self.aux_loader)
-
-        return batch
-
-
 def get_sentiment_task_dataloaders(args):
     train_data1, num_labels1 = load_sentiment_data(args.imdb_train, 'train')
     dev_data1 = load_sentiment_data(args.imdb_dev, 'valid')
-
     train_data2, num_labels2 = load_sentiment_data(args.sst_train, 'train')
     dev_data2 = load_sentiment_data(args.sst_dev, 'valid')
+
+    if args.debug:
+        train_data1 = train_data1[:64]
+        dev_data1 = dev_data1[:64]
+        train_data2 = train_data2[:64]
+        dev_data2 = dev_data2[:64]
+
     train_dataset1 = SentimentDataset(train_data1, args)
     dev_dataset1 = SentimentDataset(dev_data1, args)
     train_dataset2 = SentimentDataset(train_data2, args)
@@ -245,32 +233,65 @@ def get_sentiment_task_dataloaders(args):
             "num_labels": max(num_labels1, num_labels2)}
 
 
-class MultitaskLoader:
-    def __init__(self, main_loader, aux_loader1, aux_loader2, aux_ratio1=0.1,
-                 aux_ratio2=0.1):
-        self.main_loader = iter(main_loader)
-        self.aux_loader1 = cycle(aux_loader1)
-        self.aux_ratio1 = aux_ratio1
-        self.aux_loader2 = cycle(aux_loader2)
-        self.aux_ratio2 = aux_ratio2
-        self.counter = 0
-        self.len = len(main_loader)
+class CombinedDataLoader:
+    def __init__(self, main_loader, aux_loader):
+        self.main_loader = main_loader
+        self.aux_loader = aux_loader
+        self.main_loader_iter = iter(main_loader)
+        self.aux_loader_iter = iter(aux_loader)
+        self.len = len(main_loader) + len(aux_loader)
 
     def __iter__(self):
+        self.main_loader_iter = iter(self.main_loader)
+        self.aux_loader_iter = iter(self.aux_loader)
         return self
 
     def __len__(self):
         return self.len
 
     def __next__(self):
-        main_batch = next(self.main_loader)
+        try:
+            batch = next(self.main_loader_iter)
+        except StopIteration:
+            batch = next(self.aux_loader_iter)
+
+        return batch
+
+
+class MultitaskLoader:
+    def __init__(self, main_loader, aux_loader1, aux_loader2, aux_ratio1=0.1,
+                 aux_ratio2=0.1):
+        self.main_loader = main_loader
+        self.aux_loader1 = aux_loader1
+        self.aux_loader2 = aux_loader2
+
+        self.main_loader_iter = iter(self.main_loader)
+        self.aux_loader1_iter = cycle(self.aux_loader1)
+        self.aux_loader2_iter = cycle(self.aux_loader2)
+
+        self.aux_ratio1 = aux_ratio1
+        self.aux_ratio2 = aux_ratio2
+        self.counter = 0
+        self.len = len(main_loader)
+
+    def __iter__(self):
+        self.main_loader_iter = iter(self.main_loader)
+        self.aux_loader1_iter = cycle(self.aux_loader1)
+        self.aux_loader2_iter = cycle(self.aux_loader2)
+        return self
+
+    def __len__(self):
+        return self.len
+
+    def __next__(self):
+        main_batch = next(self.main_loader_iter)
 
         aux_batch1 = None
         if self.counter % int(1 / self.aux_ratio1) == 0:  # Sample aux periodically
-            aux_batch1 = next(self.aux_loader1)
+            aux_batch1 = next(self.aux_loader1_iter)
         aux_batch2 = None
         if self.counter % int(1 / self.aux_ratio2) == 0:  # Sample aux periodically
-            aux_batch2 = next(self.aux_loader2)
+            aux_batch2 = next(self.aux_loader2_iter)
 
         self.counter += 1
         return {'main': main_batch, 'aux1': aux_batch1, 'aux2': aux_batch2}
@@ -390,24 +411,33 @@ def train(args):
         sonnet_train_loss = sonnet_train_loss/num_batches_sonnet
         sentiment_train_loss = sentiment_train_loss/num_batches_sentiment
 
-        para_dev_acc, dev_f1, *_ = model_eval_paraphrase(
-            para_task_dataloaders["dev"], model, device, mode="dev")
-        para_train_acc, dev_f1, *_ = model_eval_paraphrase(
-            para_task_dataloaders["train"], model, device, mode="train")
+        if args.debug:
+            # skip eval for quick debug
+            para_dev_acc = 0
+            para_train_acc = 0
+            sonnet_dev_acc = 0
+            sentiment_dev_acc = 0
+            sentiment_train_acc = 0
+            sonnet_train_acc = 0
+        else:
+            para_dev_acc, dev_f1, *_ = model_eval_paraphrase(
+                para_task_dataloaders["dev"], model, device, mode="dev")
+            para_train_acc, dev_f1, *_ = model_eval_paraphrase(
+                para_task_dataloaders["train"], model, device, mode="train")
 
-        sonnet_dev_acc = model_eval_sonnet(
-            sonnet_task_dataloaders["dev_held_out"],
-            sonnet_task_dataloaders["dev_label_path"],
-            model, device, args.temperature, args.top_p, mode="dev") / 100
-        sonnet_train_acc = model_eval_sonnet(
-            sonnet_task_dataloaders["train_held_out"],
-            sonnet_task_dataloaders["train_held_out_label_path"],
-            model, device, args.temperature, args.top_p, mode="train") / 100
+            sonnet_dev_acc = model_eval_sonnet(
+                sonnet_task_dataloaders["dev_held_out"],
+                sonnet_task_dataloaders["dev_label_path"],
+                model, device, args.temperature, args.top_p, mode="dev") / 100
+            sonnet_train_acc = model_eval_sonnet(
+                sonnet_task_dataloaders["train_held_out"],
+                sonnet_task_dataloaders["train_held_out_label_path"],
+                model, device, args.temperature, args.top_p, mode="train") / 100
 
-        sentiment_dev_acc, dev_f1, *_ = model_sentiment_eval(
-            sentiment_task_dataloaders["dev"], model, device, mode="dev")
-        sentiment_train_acc, dev_f1, *_ = model_sentiment_eval(
-            sentiment_task_dataloaders["train"], model, device, mode="train")
+            sentiment_dev_acc, dev_f1, *_ = model_sentiment_eval(
+                sentiment_task_dataloaders["dev"], model, device, mode="dev")
+            sentiment_train_acc, dev_f1, *_ = model_sentiment_eval(
+                sentiment_task_dataloaders["train"], model, device, mode="train")
 
         # calculate weighted score between tasks
         weighted_score = 0.33 * para_dev_acc + 0.33 * sonnet_dev_acc + 0.33 * sentiment_dev_acc
@@ -536,6 +566,7 @@ def get_args():
     parser.add_argument("--seed", type=int, default=11711)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--use_gpu", action='store_true')
+    parser.add_argument("--debug", action='store_true')
 
     parser.add_argument(
         "--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int,
