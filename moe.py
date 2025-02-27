@@ -341,6 +341,44 @@ def sonnet_task_train(batch, model, device):
     return task_loss, task_aux_loss
 
 
+class DynamicWeightAveraging:
+    def __init__(self, num_tasks, T=2.0):
+        """
+        Implements Dynamic Weight Averaging (DWA) for multi-task learning from Liu et al. (2019).
+
+        Args:
+            num_tasks (int): Number of tasks.
+            T (float): Temperature parameter for weight distribution.
+        """
+        self.num_tasks = num_tasks
+        self.T = T
+        self.prev_losses = [1.0] * num_tasks  # Initialize with dummy values
+
+    def get_weights(self, current_losses):
+        """
+        Compute task weights dynamically.
+
+        Args:
+            current_losses (list of floats): Loss values for each task.
+
+        Returns:
+            weights (torch.Tensor): Normalized weights for each task.
+        """
+        eps = 1e-8  # Avoid division by zero
+        loss_ratios = [
+            self.prev_losses[i] / (current_losses[i].item() + eps)
+            for i in range(self.num_tasks)]
+
+        # Normalize with softmax
+        exps = torch.exp(torch.tensor(loss_ratios) / self.T)
+        weights = exps / exps.sum()
+
+        # Store current losses for next iteration (only if nonzero)
+        self.prev_losses = [max(l.item(), eps) for l in current_losses]
+
+        return weights
+
+
 def train(args):
     """Train GPT-2 for paraphrase detection on the Quora dataset."""
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
@@ -355,16 +393,13 @@ def train(args):
     model = model.to(device)
 
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    dwa = DynamicWeightAveraging(num_tasks=3, T=2.0)
 
     best_score = 0
     for epoch in range(args.epochs):
         model.train()
-        paraphrase_task_loss = 0
-        sonnet_train_loss = 0
-        sentiment_train_loss = 0
-        num_batches_paraphrase = 0
-        num_batches_sonnet = 0
-        num_batches_sentiment = 0
+        paraphrase_task_loss, sonnet_train_loss, sentiment_train_loss = 0, 0, 0
+        num_batches_paraphrase, num_batches_sonnet, num_batches_sentiment = 0, 0, 0
 
         combined_loader = MultitaskLoader(
             para_task_dataloaders["train"],
@@ -381,80 +416,96 @@ def train(args):
             sentiment_batch = batch['aux2']
 
             # task 1
-            num_batches_paraphrase += 1
             paraphrase_loss, paraphrase_aux_loss = paraphrase_task_train(
                 main_batch, model, device)
-            paraphrase_task_loss += paraphrase_loss.item() + paraphrase_aux_loss.item()
+            total_para_loss = paraphrase_loss + paraphrase_aux_loss
+            num_batches_paraphrase += 1
 
-            total_loss = 0.2 * (paraphrase_loss + paraphrase_aux_loss)
+            total_sonnet_loss = torch.tensor(0.0, device=device)
             if sonnet_batch is not None:
-                num_batches_sonnet += 1
-                # task 2
                 sonnet_task_loss, sonnet_aux_loss = sonnet_task_train(
                     sonnet_batch, model, device)
-                sonnet_train_loss += sonnet_task_loss.item() + sonnet_aux_loss.item()
-                total_loss += 0.4 * (sonnet_task_loss + sonnet_aux_loss)
+                total_sonnet_loss = sonnet_task_loss + sonnet_aux_loss
+                num_batches_sonnet += 1
 
+            total_sentiment_loss = torch.tensor(0.0, device=device)
             if sentiment_batch is not None:
-                num_batches_sentiment += 1
-                # task 3
                 sentiment_task_loss, sentiment_task_aux_loss = sentiment_task_train(
-                    sentiment_batch, model, device)
-                sentiment_train_loss += sentiment_task_loss.item() + sentiment_task_aux_loss.item()
-                total_loss += 0.4 * (sentiment_task_loss +
-                                     sentiment_task_aux_loss)
+                    sentiment_batch,
+                    model,
+                    device)
+                total_sentiment_loss = sentiment_task_loss + sentiment_task_aux_loss
+                num_batches_sentiment += 1
+
+            current_losses = [total_para_loss, total_sonnet_loss, total_sentiment_loss]
+            task_weights = dwa.get_weights(current_losses)
+            total_loss = task_weights[0] * total_para_loss + task_weights[1] * \
+                total_sonnet_loss + task_weights[2] * total_sentiment_loss
 
             total_loss.backward()
             optimizer.step()
+
+            paraphrase_task_loss += total_para_loss.item()
+            sonnet_train_loss += total_sonnet_loss.item()
+            sentiment_train_loss += total_sentiment_loss.item()
 
         paraphrase_task_loss = paraphrase_task_loss/num_batches_paraphrase
         sonnet_train_loss = sonnet_train_loss/num_batches_sonnet
         sentiment_train_loss = sentiment_train_loss/num_batches_sentiment
 
-        if args.debug:
-            # skip eval for quick debug
-            para_dev_acc = 0
-            para_train_acc = 0
-            sonnet_dev_acc = 0
-            sentiment_dev_acc = 0
-            sentiment_train_acc = 0
-            sonnet_train_acc = 0
-        else:
-            para_dev_acc, dev_f1, *_ = model_eval_paraphrase(
-                para_task_dataloaders["dev"], model, device, mode="dev")
-            para_train_acc, dev_f1, *_ = model_eval_paraphrase(
-                para_task_dataloaders["train"], model, device, mode="train")
-
-            sonnet_dev_acc = model_eval_sonnet(
-                sonnet_task_dataloaders["dev_held_out"],
-                sonnet_task_dataloaders["dev_label_path"],
-                model, device, args.temperature, args.top_p, mode="dev") / 100
-            sonnet_train_acc = model_eval_sonnet(
-                sonnet_task_dataloaders["train_held_out"],
-                sonnet_task_dataloaders["train_held_out_label_path"],
-                model, device, args.temperature, args.top_p, mode="train") / 100
-
-            sentiment_dev_acc, dev_f1, *_ = model_sentiment_eval(
-                sentiment_task_dataloaders["dev"], model, device, mode="dev")
-            sentiment_train_acc, dev_f1, *_ = model_sentiment_eval(
-                sentiment_task_dataloaders["train"], model, device, mode="train")
+        # evaluate model
+        para_dev_acc, para_train_acc, sonnet_dev_acc, sonnet_train_acc, sentiment_dev_acc, sentiment_train_acc = evaluate_model(
+            args, model, para_task_dataloaders, sonnet_task_dataloaders, sentiment_task_dataloaders, device)
 
         # calculate weighted score between tasks
         weighted_score = 0.33 * para_dev_acc + 0.33 * sonnet_dev_acc + 0.33 * sentiment_dev_acc
 
-        if weighted_score > best_score:
+        if weighted_score > best_score and not args.debug:
             save_model(model, optimizer, args, args.filepath)
             best_score = weighted_score
 
         print(
             f"paraphrase_loss: {paraphrase_task_loss:.3f}, sonnet_loss: {sonnet_train_loss:.3f}, sentiment_loss: {sentiment_train_loss:.3f} para dev acc :: {para_dev_acc:.3f}, sonnet dev acc :: {sonnet_dev_acc:.3f}, sentiment dev acc :: {sentiment_dev_acc:.3f}")
-        wandb.log(
-            {"paraphrase_loss": paraphrase_task_loss, "sonnet_loss": sonnet_train_loss,
-             "sentiment_loss": sentiment_train_loss, "para_dev_acc": para_dev_acc,
-             "sonnet_dev_acc": sonnet_dev_acc, "sentiment_dev_acc": sentiment_dev_acc,
-             "para_train_acc": para_train_acc, "sonnet_train_acc": sonnet_train_acc,
-             "sentiment_train_acc": sentiment_train_acc, "best_score": best_score,
-             "weighted_score": weighted_score, "epoch": epoch})
+        if not args.debug:
+            wandb.log(
+                {"paraphrase_loss": paraphrase_task_loss, "sonnet_loss": sonnet_train_loss,
+                 "sentiment_loss": sentiment_train_loss, "para_dev_acc": para_dev_acc,
+                 "sonnet_dev_acc": sonnet_dev_acc, "sentiment_dev_acc": sentiment_dev_acc,
+                 "para_train_acc": para_train_acc, "sonnet_train_acc": sonnet_train_acc,
+                 "sentiment_train_acc": sentiment_train_acc, "best_score": best_score,
+                 "weighted_score": weighted_score, "epoch": epoch})
+
+
+def evaluate_model(
+        args, model, para_task_dataloaders, sonnet_task_dataloaders,
+        sentiment_task_dataloaders, device):
+    """Evaluate model on all tasks."""
+    if args.debug:
+        return 0, 0, 0, 0, 0, 0  # Skip evaluation in debug mode
+    para_dev_acc, *_ = model_eval_paraphrase(
+        para_task_dataloaders["dev"],
+        model, device, mode="dev")
+    para_train_acc, *_ = model_eval_paraphrase(
+        para_task_dataloaders["train"],
+        model, device, mode="train")
+
+    sonnet_dev_acc = model_eval_sonnet(
+        sonnet_task_dataloaders["dev_held_out"],
+        sonnet_task_dataloaders["dev_label_path"],
+        model, device, args.temperature, args.top_p, mode="dev") / 100
+    sonnet_train_acc = model_eval_sonnet(
+        sonnet_task_dataloaders["train_held_out"],
+        sonnet_task_dataloaders["train_held_out_label_path"],
+        model, device, args.temperature, args.top_p, mode="train") / 100
+
+    sentiment_dev_acc, *_ = model_sentiment_eval(
+        sentiment_task_dataloaders["dev"],
+        model, device, mode="dev")
+    sentiment_train_acc, *_ = model_sentiment_eval(
+        sentiment_task_dataloaders["train"],
+        model, device, mode="train")
+
+    return para_dev_acc, para_train_acc, sonnet_dev_acc, sonnet_train_acc, sentiment_dev_acc, sentiment_train_acc
 
 
 @torch.no_grad()
