@@ -438,9 +438,13 @@ def train(args):
                 num_batches_sentiment += 1
 
             current_losses = [total_para_loss, total_sonnet_loss, total_sentiment_loss]
-            task_weights = dwa.get_weights(current_losses)
-            total_loss = task_weights[0] * total_para_loss + task_weights[1] * \
-                total_sonnet_loss + task_weights[2] * total_sentiment_loss
+
+            if args.use_dwa:
+                task_weights = dwa.get_weights(current_losses)
+                total_loss = task_weights[0] * total_para_loss + task_weights[1] * \
+                    total_sonnet_loss + task_weights[2] * total_sentiment_loss
+            else:
+                total_loss = total_para_loss + total_sonnet_loss + total_sentiment_loss
 
             total_loss.backward()
             optimizer.step()
@@ -628,6 +632,8 @@ def get_args():
         help="The model size as specified on hugging face. DO NOT use the xl model.",
         choices=['gpt2', 'gpt2-medium', 'gpt2-large'],
         default='gpt2')
+
+    parser.add_argument("--use_dwa", action='store_true')
 
     parser.add_argument("--hidden_size", type=int, default=768)
     parser.add_argument("--weight_decay", type=int, default=0.01)
