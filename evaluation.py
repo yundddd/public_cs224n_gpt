@@ -105,7 +105,7 @@ def model_eval_sonnet(
         generated_sonnets.append((sonnet_id, full_sonnet))
 
         if count < 1:
-            print(f'{decoded_output}\n\n')
+            # print(f'{decoded_output}\n\n')
             count += 1
 
     with open("/tmp/sonnet_dev_completion", "w+") as f:
