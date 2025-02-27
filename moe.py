@@ -64,11 +64,11 @@ class MoEGPT(nn.Module):
         self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Only fine tune the MoE layers.
-        for param in self.gpt.parameters():
-            param.requires_grad = False
-        for param in self.gpt.gptmoe_layers.parameters():
-            param.requires_grad = True
+        if not args.full_finetune:
+            for param in self.gpt.parameters():
+                param.requires_grad = False
+            for param in self.gpt.gptmoe_layers.parameters():
+                param.requires_grad = True
 
     def forward(self, input_ids, attention_mask):
         gpt_output = self.gpt(input_ids=input_ids, attention_mask=attention_mask)
@@ -619,7 +619,7 @@ def get_args():
         help="Cumulative probability distribution for nucleus sampling.", default=0.9)
 
     parser.add_argument("--seed", type=int, default=11711)
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--use_gpu", action='store_true')
     parser.add_argument("--debug", action='store_true')
 
@@ -634,6 +634,7 @@ def get_args():
         default='gpt2')
 
     parser.add_argument("--use_dwa", action='store_true')
+    parser.add_argument("--full_finetune", action='store_true')
 
     parser.add_argument("--hidden_size", type=int, default=768)
     parser.add_argument("--weight_decay", type=int, default=0.01)
