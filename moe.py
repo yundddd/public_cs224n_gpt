@@ -259,8 +259,8 @@ class CombinedDataLoader:
 
 
 class MultitaskLoader:
-    def __init__(self, main_loader, aux_loader1, aux_loader2, aux_ratio1=0.1,
-                 aux_ratio2=0.1):
+    def __init__(self, main_loader, aux_loader1, aux_loader2, aux_ratio1,
+                 aux_ratio2):
         self.main_loader = main_loader
         self.aux_loader1 = aux_loader1
         self.aux_loader2 = aux_loader2
@@ -354,7 +354,7 @@ def train(args):
     model = MoEGPT(args)
     model = model.to(device)
 
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.)
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     best_score = 0
     for epoch in range(args.epochs):
@@ -370,7 +370,7 @@ def train(args):
             para_task_dataloaders["train"],
             sonnet_task_dataloaders["train"],
             sentiment_task_dataloaders["train"],
-            aux_ratio1=0.1 - epoch * 0.01, aux_ratio2=0.1 - epoch * 0.01)
+            aux_ratio1=0.0025, aux_ratio2=0.25)
         for batch in tqdm(
                 iterable=combined_loader, total=len(combined_loader),
                 desc=f"Epoch {epoch + 1} /{args.epochs} "):
@@ -579,10 +579,11 @@ def get_args():
         default='gpt2')
 
     parser.add_argument("--hidden_size", type=int, default=768)
+    parser.add_argument("--weight_decay", type=int, default=0.01)
 
     parser.add_argument("--num_moe_layers", type=int, default=1)
     parser.add_argument("--expert_hidden_size", type=int, default=128)
-    parser.add_argument("--num_experts", type=int, default=2)
+    parser.add_argument("--num_experts", type=int, default=3)
     parser.add_argument("--aux_loss_weight", type=float, default=0.01)
 
     args = parser.parse_args()
