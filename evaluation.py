@@ -20,7 +20,7 @@ TQDM_DISABLE = False
 
 
 @torch.no_grad()
-def model_eval_paraphrase(dataloader, model, device):
+def model_eval_paraphrase(dataloader, model, device, mode):
     def map_labels(labels):
         label_map = {3919: 1, 8505: 0}
         return torch.tensor(
@@ -31,7 +31,7 @@ def model_eval_paraphrase(dataloader, model, device):
     y_true, y_pred, sent_ids = [], [], []
     for step, batch in enumerate(
         tqdm(
-            dataloader, desc=f'paraphrase dev eval',
+            dataloader, desc=f'paraphrase {mode} eval',
             disable=TQDM_DISABLE)):
         b_ids, b_mask, b_sent_ids, labels = batch['token_ids'], batch['attention_mask'], batch['sent_ids'], batch[
             'labels'].flatten()
@@ -41,7 +41,7 @@ def model_eval_paraphrase(dataloader, model, device):
 
         output = model(b_ids, b_mask)
         if isinstance(output, dict):
-            logits = output['classification_logits'].cpu().numpy()
+            logits = output['paraphrase_logits'].cpu().numpy()
         else:
             logits = model(b_ids, b_mask).cpu().numpy()
         preds = np.argmax(logits, axis=1).flatten()
@@ -72,7 +72,7 @@ def model_test_paraphrase(dataloader, model, device):
 
         output = model(b_ids, b_mask)
         if isinstance(output, dict):
-            logits = output['classification_logits'].cpu().numpy()
+            logits = output['paraphrase_logits'].cpu().numpy()
         else:
             logits = model(b_ids, b_mask).cpu().numpy()
         preds = np.argmax(logits, axis=1).flatten()
@@ -86,12 +86,12 @@ def model_test_paraphrase(dataloader, model, device):
 @torch.no_grad()
 def model_eval_sonnet(
     dev_held_out_dataset, dev_label_path, model, device, temperature,
-        top_p):
+        top_p, mode):
     model.eval()
 
     generated_sonnets = []
     count = 0
-    for batch in tqdm(dev_held_out_dataset, desc='sonnet dev eval',
+    for batch in tqdm(dev_held_out_dataset, desc=f'sonnet {mode} eval',
                       disable=TQDM_DISABLE):
         sonnet_id = batch[0]
         encoding = model.tokenizer(
@@ -104,10 +104,9 @@ def model_eval_sonnet(
         full_sonnet = f'{decoded_output}\n\n'
         generated_sonnets.append((sonnet_id, full_sonnet))
 
-        if count < 5:
+        if count < 1:
             print(f'{decoded_output}\n\n')
             count += 1
-
 
     with open("/tmp/sonnet_dev_completion", "w+") as f:
         f.write("--Generated Sonnets-- \n\n")
@@ -134,3 +133,36 @@ def test_sonnet(
     # compute chrf
     chrf_score = chrf.corpus_score(generated_sonnets, [true_sonnets])
     return float(chrf_score.score)
+
+
+def model_sentiment_eval(dataloader, model, device, mode):
+    model.eval()  # Switch to eval model, will turn off randomness like dropout.
+    y_true = []
+    y_pred = []
+    sents = []
+    sent_ids = []
+    for step, batch in enumerate(
+        tqdm(
+            dataloader, desc=f'sentiment {mode} eval',
+            disable=TQDM_DISABLE)):
+        b_ids, b_mask, b_labels, b_sents, b_sent_ids = batch['token_ids'], batch[
+            'attention_mask'], batch['labels'], batch['sents'], batch['sent_ids']
+
+        b_ids = b_ids.to(device)
+        b_mask = b_mask.to(device)
+
+        output = model(b_ids, b_mask)
+        logits = output['sentiment_logits']
+        logits = logits.detach().cpu().numpy()
+        preds = np.argmax(logits, axis=1).flatten()
+
+        b_labels = b_labels.flatten()
+        y_true.extend(b_labels)
+        y_pred.extend(preds)
+        sents.extend(b_sents)
+        sent_ids.extend(b_sent_ids)
+
+    f1 = f1_score(y_true, y_pred, average='macro')
+    acc = accuracy_score(y_true, y_pred)
+
+    return acc, f1, y_pred, y_true, sents, sent_ids

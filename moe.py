@@ -2,7 +2,7 @@
 from datetime import datetime
 from models.gpt2_moe import GPT2MoEModel
 from optimizer import AdamW
-from evaluation import model_eval_paraphrase, model_test_paraphrase, model_eval_sonnet
+from evaluation import model_eval_paraphrase, model_sentiment_eval, model_test_paraphrase, model_eval_sonnet
 from datasets import (
     ParaphraseDetectionDataset,
     ParaphraseDetectionTestDataset,
@@ -58,6 +58,8 @@ class MoEGPT(nn.Module):
             aux_loss_weight=args.aux_loss_weight)
         # Paraphrase detection has two outputs: 1 (yes) or 0 (no).
         self.paraphrase_detection_head = nn.Linear(args.d, 2)
+        # sentiment classification head
+        self.sentiment_classifier = torch.nn.Linear(args.hidden_size, args.num_labels)
 
         self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
         self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -71,11 +73,13 @@ class MoEGPT(nn.Module):
     def forward(self, input_ids, attention_mask):
         gpt_output = self.gpt(input_ids=input_ids, attention_mask=attention_mask)
         last_token_hidden_state = gpt_output["last_token"]
-        classification_logits = self.paraphrase_detection_head(last_token_hidden_state)
+        paraphrase_logits = self.paraphrase_detection_head(last_token_hidden_state)
+        sentiment_logits = self.sentiment_classifier(last_token_hidden_state)
 
         last_hidden_state = gpt_output["last_hidden_state"]
         next_token_logits = self.gpt.hidden_state_to_token(last_hidden_state)
-        return {"classification_logits": classification_logits,
+        return {"paraphrase_logits": paraphrase_logits,
+                "sentiment_logits": sentiment_logits,
                 "next_token_logits": next_token_logits,
                 "aux_loss": gpt_output["aux_loss"]}
 
@@ -180,36 +184,75 @@ def get_sonnet_task_dataloaders(args):
         train_sonnet_dataset, shuffle=True, batch_size=args.batch_size,
         collate_fn=train_sonnet_dataset.collate_fn)
 
+    train_held_out_sonnet_dataset = SonnetsDataset(args.sonnet_train_held_out_path)
     dev_held_out_sonnet_dataset = SonnetsDataset(args.sonnet_dev_held_out_path)
 
     return {"train": train_sonnet_dataloader,
+            "train_held_out_label_path": args.sonnet_train_path,
+            "train_held_out": train_held_out_sonnet_dataset,
             "dev_held_out": dev_held_out_sonnet_dataset,
             "dev_label_path": args.sonnet_dev_label_path}
 
 
-def get_sentiment_task_dataloaders(args, type):
-    if type == 'imdb':
-        train_data, num_labels = load_sentiment_data(args.imdb_train, 'train')
-        dev_data = load_sentiment_data(args.imdb_dev, 'valid')
-    elif type == 'sst':
-        train_data, num_labels = load_sentiment_data(args.sst_train, 'train')
-        dev_data = load_sentiment_data(args.sst_dev, 'valid')
-    train_dataset = SentimentDataset(train_data, args)
-    dev_dataset = SentimentDataset(dev_data, args)
-    train_dataloader = DataLoader(
-        train_dataset, shuffle=True, batch_size=args.batch_size,
-        collate_fn=train_dataset.collate_fn)
-    dev_dataloader = DataLoader(dev_dataset, shuffle=False, batch_size=args.batch_size,
-                                collate_fn=dev_dataset.collate_fn)
+class CombinedDataLoader:
+    def __init__(self, main_loader, aux_loader):
+        self.main_loader = iter(main_loader)
+        self.aux_loader = iter(aux_loader)
+        self.len = len(main_loader) + len(aux_loader)
 
-    return {"train": train_dataloader, "dev": dev_dataloader}
+    def __iter__(self):
+        return self
+
+    def __len__(self):
+        return self.len
+
+    def __next__(self):
+        try:
+            batch = next(self.main_loader)
+        except StopIteration:
+            batch = next(self.aux_loader)
+
+        return batch
+
+
+def get_sentiment_task_dataloaders(args):
+    train_data1, num_labels1 = load_sentiment_data(args.imdb_train, 'train')
+    dev_data1 = load_sentiment_data(args.imdb_dev, 'valid')
+
+    train_data2, num_labels2 = load_sentiment_data(args.sst_train, 'train')
+    dev_data2 = load_sentiment_data(args.sst_dev, 'valid')
+    train_dataset1 = SentimentDataset(train_data1, args)
+    dev_dataset1 = SentimentDataset(dev_data1, args)
+    train_dataset2 = SentimentDataset(train_data2, args)
+    dev_dataset2 = SentimentDataset(dev_data2, args)
+    train_dataloader1 = DataLoader(
+        train_dataset1, shuffle=True, batch_size=args.batch_size,
+        collate_fn=train_dataset1.collate_fn)
+    dev_dataloader1 = DataLoader(
+        dev_dataset1, shuffle=False, batch_size=args.batch_size,
+        collate_fn=dev_dataset1.collate_fn)
+    train_dataloader2 = DataLoader(
+        train_dataset2, shuffle=True, batch_size=args.batch_size,
+        collate_fn=train_dataset2.collate_fn)
+    dev_dataloader2 = DataLoader(
+        dev_dataset2, shuffle=False, batch_size=args.batch_size,
+        collate_fn=dev_dataset2.collate_fn)
+
+    combined_train = CombinedDataLoader(train_dataloader1, train_dataloader2)
+    combined_dev = CombinedDataLoader(dev_dataloader1, dev_dataloader2)
+
+    return {"train": combined_train, "dev": combined_dev,
+            "num_labels": max(num_labels1, num_labels2)}
 
 
 class MultitaskLoader:
-    def __init__(self, main_loader, aux_loader, aux_ratio=0.1):
+    def __init__(self, main_loader, aux_loader1, aux_loader2, aux_ratio1=0.1,
+                 aux_ratio2=0.1):
         self.main_loader = iter(main_loader)
-        self.aux_loader = cycle(aux_loader)
-        self.aux_ratio = aux_ratio
+        self.aux_loader1 = cycle(aux_loader1)
+        self.aux_ratio1 = aux_ratio1
+        self.aux_loader2 = cycle(aux_loader2)
+        self.aux_ratio2 = aux_ratio2
         self.counter = 0
         self.len = len(main_loader)
 
@@ -222,12 +265,30 @@ class MultitaskLoader:
     def __next__(self):
         main_batch = next(self.main_loader)
 
-        aux_batch = None
-        if self.counter % int(1 / self.aux_ratio) == 0:  # Sample aux periodically
-            aux_batch = next(self.aux_loader)
+        aux_batch1 = None
+        if self.counter % int(1 / self.aux_ratio1) == 0:  # Sample aux periodically
+            aux_batch1 = next(self.aux_loader1)
+        aux_batch2 = None
+        if self.counter % int(1 / self.aux_ratio2) == 0:  # Sample aux periodically
+            aux_batch2 = next(self.aux_loader2)
 
         self.counter += 1
-        return {'main': main_batch, 'aux': aux_batch}
+        return {'main': main_batch, 'aux1': aux_batch1, 'aux2': aux_batch2}
+
+
+def sentiment_task_train(batch, model, device):
+    b_ids, b_mask, b_labels = (batch['token_ids'],
+                               batch['attention_mask'], batch['labels'])
+    b_ids = b_ids.to(device)
+    b_mask = b_mask.to(device)
+    b_labels = b_labels.to(device)
+
+    output = model(b_ids, b_mask)
+    task_loss = F.cross_entropy(
+        output["sentiment_logits"], b_labels.view(-1),
+        reduction='mean')
+    task_aux_loss = output["aux_loss"]
+    return task_loss, task_aux_loss
 
 
 def paraphrase_task_train(batch, model, device):
@@ -238,11 +299,11 @@ def paraphrase_task_train(batch, model, device):
     # Map labels to 0 and 1
     mapped_labels = map_labels(labels).to(device)
     output = model(b_ids, b_mask)
-    task1_loss = F.cross_entropy(
-        output["classification_logits"],
+    task_loss = F.cross_entropy(
+        output["paraphrase_logits"],
         mapped_labels, reduction='mean')
-    task1_aux_loss = output["aux_loss"]
-    return task1_loss, task1_aux_loss
+    task_aux_loss = output["aux_loss"]
+    return task_loss, task_aux_loss
 
 
 def sonnet_task_train(batch, model, device):
@@ -254,9 +315,9 @@ def sonnet_task_train(batch, model, device):
     logits = rearrange(logits[:, :-1].contiguous(), 'b t d -> (b t) d')
     # Ignore the first token to compose the labels.
     labels = b_ids[:, 1:].contiguous().flatten()
-    task2_loss = F.cross_entropy(logits, labels, reduction='mean')
-    task2_aux_loss = output["aux_loss"]
-    return task2_loss, task2_aux_loss
+    task_loss = F.cross_entropy(logits, labels, reduction='mean')
+    task_aux_loss = output["aux_loss"]
+    return task_loss, task_aux_loss
 
 
 def train(args):
@@ -265,84 +326,109 @@ def train(args):
     # paraphrase task
     para_task_dataloaders = get_paraphrase_task_dataloaders(args)
     sonnet_task_dataloaders = get_sonnet_task_dataloaders(args)
+    sentiment_task_dataloaders = get_sentiment_task_dataloaders(args)
 
+    args.num_labels = sentiment_task_dataloaders["num_labels"]
     args = add_arguments(args)
     model = MoEGPT(args)
     model = model.to(device)
 
-    lr = args.lr
-    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.)
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.)
 
     best_score = 0
     for epoch in range(args.epochs):
         model.train()
-        task1_train_loss = 0
-        task2_train_loss = 0
-        num_batches_main = 0
-        num_batches_aux = 0
+        paraphrase_task_loss = 0
+        sonnet_train_loss = 0
+        sentiment_train_loss = 0
+        num_batches_paraphrase = 0
+        num_batches_sonnet = 0
+        num_batches_sentiment = 0
 
         combined_loader = MultitaskLoader(
             para_task_dataloaders["train"],
-            sonnet_task_dataloaders["train"], aux_ratio=0.1 - epoch * 0.01)
+            sonnet_task_dataloaders["train"],
+            sentiment_task_dataloaders["train"],
+            aux_ratio1=0.1 - epoch * 0.01, aux_ratio2=0.1 - epoch * 0.01)
         for batch in tqdm(
                 iterable=combined_loader, total=len(combined_loader),
                 desc=f"Epoch {epoch + 1} /{args.epochs} "):
             optimizer.zero_grad()
 
             main_batch = batch['main']
-            aux_batch = batch['aux']
+            sonnet_batch = batch['aux1']
+            sentiment_batch = batch['aux2']
 
             # task 1
-            num_batches_main += 1
-            task1_loss, task1_aux_loss = paraphrase_task_train(
+            num_batches_paraphrase += 1
+            paraphrase_loss, paraphrase_aux_loss = paraphrase_task_train(
                 main_batch, model, device)
-            task1_train_loss += task1_loss.item() + task1_aux_loss.item()
+            paraphrase_task_loss += paraphrase_loss.item() + paraphrase_aux_loss.item()
 
-            if aux_batch is not None:
-                num_batches_aux += 1
+            total_loss = 0.2 * (paraphrase_loss + paraphrase_aux_loss)
+            if sonnet_batch is not None:
+                num_batches_sonnet += 1
                 # task 2
-                task2_loss, task2_aux_loss = sonnet_task_train(
-                    aux_batch, model, device)
-                task2_train_loss += task2_loss.item() + task2_aux_loss.item()
+                sonnet_task_loss, sonnet_aux_loss = sonnet_task_train(
+                    sonnet_batch, model, device)
+                sonnet_train_loss += sonnet_task_loss.item() + sonnet_aux_loss.item()
+                total_loss += 0.4 * (sonnet_task_loss + sonnet_aux_loss)
 
-                total_loss = 0.3*(task1_loss + task1_aux_loss) + \
-                    0.7 * (task2_loss + task2_aux_loss)
-            else:
-                total_loss = task1_loss + task1_aux_loss
+            if sentiment_batch is not None:
+                num_batches_sentiment += 1
+                # task 3
+                sentiment_task_loss, sentiment_task_aux_loss = sentiment_task_train(
+                    sentiment_batch, model, device)
+                sentiment_train_loss += sentiment_task_loss.item() + sentiment_task_aux_loss.item()
+                total_loss += 0.4 * (sentiment_task_loss +
+                                     sentiment_task_aux_loss)
 
             total_loss.backward()
             optimizer.step()
 
-        task1_train_loss = task1_train_loss/num_batches_main
-        task2_train_loss = task2_train_loss/num_batches_aux
+        paraphrase_task_loss = paraphrase_task_loss/num_batches_paraphrase
+        sonnet_train_loss = sonnet_train_loss/num_batches_sonnet
+        sentiment_train_loss = sentiment_train_loss/num_batches_sentiment
 
         para_dev_acc, dev_f1, *_ = model_eval_paraphrase(
-            para_task_dataloaders["dev"], model, device)
+            para_task_dataloaders["dev"], model, device, mode="dev")
+        para_train_acc, dev_f1, *_ = model_eval_paraphrase(
+            para_task_dataloaders["train"], model, device, mode="train")
 
         sonnet_dev_acc = model_eval_sonnet(
             sonnet_task_dataloaders["dev_held_out"],
             sonnet_task_dataloaders["dev_label_path"],
-            model, device, args.temperature, args.top_p) / 100
+            model, device, args.temperature, args.top_p, mode="dev") / 100
+        sonnet_train_acc = model_eval_sonnet(
+            sonnet_task_dataloaders["train_held_out"],
+            sonnet_task_dataloaders["train_held_out_label_path"],
+            model, device, args.temperature, args.top_p, mode="train") / 100
+
+        sentiment_dev_acc, dev_f1, *_ = model_sentiment_eval(
+            sentiment_task_dataloaders["dev"], model, device, mode="dev")
+        sentiment_train_acc, dev_f1, *_ = model_sentiment_eval(
+            sentiment_task_dataloaders["train"], model, device, mode="train")
 
         # calculate weighted score between tasks
-        weighted_score = 0.5 * para_dev_acc + 0.5 * sonnet_dev_acc
+        weighted_score = 0.33 * para_dev_acc + 0.33 * sonnet_dev_acc + 0.33 * sentiment_dev_acc
 
         if weighted_score > best_score:
             save_model(model, optimizer, args, args.filepath)
             best_score = weighted_score
 
         print(
-            f"paraphrase_loss: {task1_train_loss:.3f}, sonnet_loss: {task2_train_loss:.3f} para dev acc :: {para_dev_acc:.3f}, sonnet dev acc :: {sonnet_dev_acc:.3f}")
+            f"paraphrase_loss: {paraphrase_task_loss:.3f}, sonnet_loss: {sonnet_train_loss:.3f}, sentiment_loss: {sentiment_train_loss:.3f} para dev acc :: {para_dev_acc:.3f}, sonnet dev acc :: {sonnet_dev_acc:.3f}, sentiment dev acc :: {sentiment_dev_acc:.3f}")
         wandb.log(
-            {"paraphrase_loss": task1_train_loss, "sonnet_loss": task2_train_loss,
-             "para_dev_acc": para_dev_acc, "sonnet_dev_acc": sonnet_dev_acc,
-             "best_score": best_score, "weighted_score": weighted_score,
-             "epoch": epoch})
+            {"paraphrase_loss": paraphrase_task_loss, "sonnet_loss": sonnet_train_loss,
+             "sentiment_loss": sentiment_train_loss, "para_dev_acc": para_dev_acc,
+             "sonnet_dev_acc": sonnet_dev_acc, "sentiment_dev_acc": sentiment_dev_acc,
+             "para_train_acc": para_train_acc, "sonnet_train_acc": sonnet_train_acc,
+             "sentiment_train_acc": sentiment_train_acc, "best_score": best_score,
+             "weighted_score": weighted_score, "epoch": epoch})
 
 
 @torch.no_grad()
 def test_paraphrase(args):
-    """Evaluate your model on the dev and test datasets; save the predictions to disk."""
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
     saved = torch.load(args.filepath)
 
@@ -386,52 +472,40 @@ def test_paraphrase(args):
     wandb.log({"best dev": dev_para_acc})
 
 
+@torch.no_grad()
 def test_sentiment(args):
-    with torch.no_grad():
-        device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
-        saved = torch.load(args.filepath)
-        config = saved['model_config']
-        model = GPT2SentimentClassifier(config)
-        model.load_state_dict(saved['model'])
-        model = model.to(device)
-        print(f"load model from {args.filepath}")
+    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+    saved = torch.load(args.filepath)
 
-        dev_data = load_data(args.dev, 'valid')
-        dev_dataset = SentimentDataset(dev_data, args)
-        dev_dataloader = DataLoader(
-            dev_dataset, shuffle=False, batch_size=args.batch_size,
-            collate_fn=dev_dataset.collate_fn)
+    model = MoEGPT(saved['args'])
+    model.load_state_dict(saved['model'])
+    model = model.to(device)
+    model.eval()
+    print(f"Loaded model to test from {args.filepath}")
 
-        test_data = load_data(args.test, 'test')
-        test_dataset = SentimentTestDataset(test_data, args)
-        test_dataloader = DataLoader(
-            test_dataset, shuffle=False, batch_size=args.batch_size,
-            collate_fn=test_dataset.collate_fn)
+    dataloader = get_sentiment_task_dataloaders(args)
 
-        dev_acc, dev_f1, dev_pred, dev_true, dev_sents, dev_sent_ids = model_eval(
-            dev_dataloader,
-            model,
-            device)
-        print('DONE DEV')
+    test_pred, test_sents, test_sent_ids = model_test_eval(
+        dataloader["test"], model, device)
+    print('DONE Test')
 
-        test_pred, test_sents, test_sent_ids = model_test_eval(
-            test_dataloader, model, device)
-        print('DONE Test')
-
-        with open(args.dev_out, "w+") as f:
-            print(f"dev acc :: {dev_acc :.3f}")
-            f.write(f"id \t Predicted_Sentiment \n")
-            for p, s in zip(dev_sent_ids, dev_pred):
-                f.write(f"{p}, {s} \n")
-
-        with open(args.test_out, "w+") as f:
-            f.write(f"id \t Predicted_Sentiment \n")
-            for p, s in zip(test_sent_ids, test_pred):
-                f.write(f"{p}, {s} \n")
+    with open(args.test_out, "w+") as f:
+        f.write(f"id \t Predicted_Sentiment \n")
+        for p, s in zip(test_sent_ids, test_pred):
+            f.write(f"{p}, {s} \n")
 
 
 def get_args():
     parser = argparse.ArgumentParser()
+
+    parser.add_argument("--imdb_train", type=str, default="data/ids-cfimdb-train.csv")
+    parser.add_argument("--imdb_dev", type=str, default="data/ids-cfimdb-dev.csv")
+    parser.add_argument("--imdb_test", type=str,
+                        default="data/ids-cfimdb-test-student.csv")
+
+    parser.add_argument("--sst_train", type=str, default="data/ids-sst-train.csv")
+    parser.add_argument("--sst_dev", type=str, default="data/ids-sst-dev.csv")
+    parser.add_argument("--sst_test", type=str, default="data/ids-sst-test-student.csv")
 
     parser.add_argument("--para_train", type=str, default="data/quora-train.csv")
     parser.add_argument("--para_dev", type=str, default="data/quora-dev.csv")
@@ -443,6 +517,8 @@ def get_args():
 
     parser.add_argument("--sonnet_train_path", type=str,
                         default="data/sonnets_train.txt")
+    parser.add_argument("--sonnet_train_held_out_path", type=str,
+                        default="data/sonnets_train_held_out.txt")
     parser.add_argument("--sonnet_dev_held_out_path", type=str,
                         default="data/sonnets_dev_held_out.txt")
     parser.add_argument("--sonnet_dev_label_path", type=str,
@@ -470,6 +546,8 @@ def get_args():
         help="The model size as specified on hugging face. DO NOT use the xl model.",
         choices=['gpt2', 'gpt2-medium', 'gpt2-large'],
         default='gpt2')
+
+    parser.add_argument("--hidden_size", type=int, default=768)
 
     parser.add_argument("--num_moe_layers", type=int, default=1)
     parser.add_argument("--expert_hidden_size", type=int, default=128)
@@ -511,5 +589,4 @@ if __name__ == "__main__":
     )
     wandb.run.log_code(include_fn=lambda path: path.endswith(".py"))
     train(args)
-    test_paraphrase(args)
     wandb.finish()
