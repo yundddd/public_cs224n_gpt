@@ -342,6 +342,12 @@ def sonnet_task_train(batch, model, device):
 
 
 class DynamicWeightAveraging:
+    """
+    Implements Dynamic Weight Averaging (DWA) for multi-task learning from Liu et al. (2019).
+    The only difference is to assign zero weights for tasks that are skipped in the current
+    iteration due to dataset imbalance.
+    """
+
     def __init__(self, num_tasks, T=2.0):
         """
         Implements Dynamic Weight Averaging (DWA) for multi-task learning from Liu et al. (2019).
@@ -355,28 +361,77 @@ class DynamicWeightAveraging:
         self.prev_losses = [1.0] * num_tasks  # Initialize with dummy values
 
     def get_weights(self, current_losses):
-        """
-        Compute task weights dynamically.
-
-        Args:
-            current_losses (list of floats): Loss values for each task.
-
-        Returns:
-            weights (torch.Tensor): Normalized weights for each task.
-        """
         eps = 1e-8  # Avoid division by zero
-        loss_ratios = [
+
+        # Only consider tasks with non-zero losses
+        valid_indices = [i for i, l in enumerate(current_losses) if l.item() > 0]
+
+        if not valid_indices:  # Handle edge case where all tasks are skipped
+            return torch.ones(self.num_tasks) / self.num_tasks
+
+        valid_loss_ratios = [
             self.prev_losses[i] / (current_losses[i].item() + eps)
-            for i in range(self.num_tasks)]
+            for i in valid_indices
+        ]
 
-        # Normalize with softmax
-        exps = torch.exp(torch.tensor(loss_ratios) / self.T)
-        weights = exps / exps.sum()
+        # Normalize with softmax over valid indices only
+        exps = torch.exp(torch.tensor(valid_loss_ratios) / self.T)
+        valid_weights = exps / exps.sum()
 
-        # Store current losses for next iteration (only if nonzero)
-        self.prev_losses = [max(l.item(), eps) for l in current_losses]
+        # Assign weights to all tasks (zero for skipped tasks)
+        weights = torch.zeros(self.num_tasks)
+        for idx, w in zip(valid_indices, valid_weights):
+            weights[idx] = w
+
+        # Update previous losses only for non-zero tasks
+        for i in valid_indices:
+            self.prev_losses[i] = max(current_losses[i].item(), eps)
 
         return weights
+
+
+def pcgrad_backward(model, losses, optimizer):
+    """
+    This function implements the PCGrad algorithm from the paper:
+    "Gradient Surgery for Multi-Task Learning" (Liu et al
+    https://arxiv.org/abs/2001.06782).
+    The only modification is to skip gradient shapes that are not compatible.
+    For example, different tasks may have different detection heads. However,
+    shared backbone like MoE layers can still participate in conflict resolution.
+    """
+    # Store gradients for each task
+    grads = []
+    for loss in losses:
+        if loss.grad_fn is not None:
+            optimizer.zero_grad()  # Clear previous gradients
+            loss.backward(retain_graph=True)  # Compute task-specific gradient
+            # Save trainable parameter grads
+            grads.append([p.grad.clone()
+                         for p in model.parameters() if p.grad is not None])
+
+    # Resolve gradient conflicts
+    for i in range(len(grads)):
+        for j in range(len(grads)):
+            if i != j:  # Compare different tasks
+                for g_i, g_j in zip(grads[i], grads[j]):
+                    # Flatten gradients to ensure compatibility
+                    if g_i.shape != g_j.shape:
+                        continue  # Skip incompatible gradients
+
+                    # Compute dot product
+                    dot_product = torch.sum(g_i * g_j)
+
+                    # Check for conflict (negative dot product)
+                    if dot_product < 0:
+                        # Resolve conflict by projecting g_i onto the normal plane of g_j
+                        projection = (dot_product / (torch.norm(g_j)**2 + 1e-8)) * g_j
+                        g_i -= projection
+
+    # Apply resolved gradients
+    optimizer.zero_grad()
+    for param, *g in zip(model.parameters(), *grads):
+        if param.requires_grad:  # Only update trainable parameters
+            param.grad = torch.stack(g).mean(dim=0)  # Aggregate modified gradients
 
 
 def train(args):
@@ -441,12 +496,15 @@ def train(args):
 
             if args.use_dwa:
                 task_weights = dwa.get_weights(current_losses)
-                total_loss = task_weights[0] * total_para_loss + task_weights[1] * \
-                    total_sonnet_loss + task_weights[2] * total_sentiment_loss
-            else:
-                total_loss = total_para_loss + total_sonnet_loss + total_sentiment_loss
+                for loss, weight in zip(current_losses, task_weights):
+                    loss *= weight
 
-            total_loss.backward()
+            if args.use_pcgrad:
+                pcgrad_backward(model, current_losses, optimizer)
+            else:
+                total_loss = sum(current_losses)
+                total_loss.backward()
+
             optimizer.step()
 
             paraphrase_task_loss += total_para_loss.item()
@@ -462,7 +520,11 @@ def train(args):
             args, model, para_task_dataloaders, sonnet_task_dataloaders, sentiment_task_dataloaders, device)
 
         # calculate weighted score between tasks
-        weighted_score = 0.33 * para_dev_acc + 0.33 * sonnet_dev_acc + 0.33 * sentiment_dev_acc
+        if para_dev_acc == 0 or sonnet_dev_acc == 0 or sentiment_dev_acc == 0:
+            weighted_score = 0
+        else:
+            weighted_score = 3 / (1 / para_dev_acc + 1 / sonnet_dev_acc + 1 /
+                                  sentiment_dev_acc)
 
         if weighted_score > best_score and not args.debug:
             save_model(model, optimizer, args, args.filepath)
@@ -634,6 +696,7 @@ def get_args():
         default='gpt2')
 
     parser.add_argument("--use_dwa", action='store_true')
+    parser.add_argument("--use_pcgrad", action='store_true')
     parser.add_argument("--full_finetune", action='store_true')
 
     parser.add_argument("--weight_decay", type=int, default=0.01)
@@ -666,18 +729,22 @@ def add_arguments(args):
     return args
 
 
+def add_arg_from_wandb_config(args, config):
+    pass
+
+
 if __name__ == "__main__":
     args = get_args()
     args.filepath = f'{args.epochs}-{args.lr}-moe.pt'  # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
 
-    dwa = "dwa" if args.use_dwa else "0dwa"
+    dwa = "1dwa" if args.use_dwa else "0dwa"
+    pcgrad = "1pcgrad" if args.use_pcgrad else "0pcgrad"
 
-    wandb.init(
+    with wandb.init(
         project="cs224n",
-        config=args,
-        name=f"MoE-{args.model_size}-{dwa}-{args.num_moe_layers}moe-{args.num_experts}exp-{args.expert_hidden_size}eh-{args.aux_loss_weight}aux-{args.weight_decay}wd-{args.lr}lr"
-    )
-    wandb.run.log_code(include_fn=lambda path: path.endswith(".py"))
-    train(args)
-    wandb.finish()
+        config=wandb.config,
+        name=f"{args.model_size}-{dwa}-{pcgrad}-{args.num_moe_layers}moe-{args.num_experts}exp-{args.expert_hidden_size}eh-{args.aux_loss_weight}aux-{args.weight_decay}wd-{args.lr}lr"
+    ):
+        wandb.run.log_code(include_fn=lambda path: path.endswith(".py"))
+        train(args)
