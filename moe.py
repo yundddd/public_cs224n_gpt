@@ -59,7 +59,7 @@ class MoEGPT(nn.Module):
         # Paraphrase detection has two outputs: 1 (yes) or 0 (no).
         self.paraphrase_detection_head = nn.Linear(args.d, 2)
         # sentiment classification head
-        self.sentiment_classifier = torch.nn.Linear(args.hidden_size, args.num_labels)
+        self.sentiment_classifier = torch.nn.Linear(args.d, args.num_labels)
 
         self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
         self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -636,7 +636,6 @@ def get_args():
     parser.add_argument("--use_dwa", action='store_true')
     parser.add_argument("--full_finetune", action='store_true')
 
-    parser.add_argument("--hidden_size", type=int, default=768)
     parser.add_argument("--weight_decay", type=int, default=0.01)
 
     parser.add_argument("--num_moe_layers", type=int, default=1)
