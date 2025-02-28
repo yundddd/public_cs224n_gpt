@@ -671,10 +671,12 @@ if __name__ == "__main__":
     args.filepath = f'{args.epochs}-{args.lr}-moe.pt'  # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
 
+    dwa = "dwa" if args.use_dwa else "0dwa"
+
     wandb.init(
         project="cs224n",
         config=args,
-        name="MoE-" + datetime.now().strftime("%m-%d %H:%M:%S ")
+        name=f"MoE-{args.model_size}-{dwa}-{args.num_moe_layers}moe-{args.num_experts}exp-{args.expert_hidden_size}eh-{args.aux_loss_weight}aux-{args.weight_decay}wd-{args.lr}lr"
     )
     wandb.run.log_code(include_fn=lambda path: path.endswith(".py"))
     train(args)
