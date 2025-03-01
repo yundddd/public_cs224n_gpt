@@ -401,39 +401,34 @@ def pcgrad_backward(model, losses, optimizer):
     For example, different tasks may have different detection heads. However,
     shared backbone like MoE layers can still participate in conflict resolution.
     """
+    optimizer.zero_grad()  # Clear gradients before computing new ones
+
     # Store gradients for each task
     grads = []
     for loss in losses:
         if loss.grad_fn is not None:
-            optimizer.zero_grad()  # Clear previous gradients
             loss.backward(retain_graph=True)  # Compute task-specific gradient
-            # Save trainable parameter grads
             grads.append([p.grad.clone()
                          for p in model.parameters() if p.grad is not None])
 
     # Resolve gradient conflicts
     for i in range(len(grads)):
-        for j in range(len(grads)):
-            if i != j:  # Compare different tasks
-                for g_i, g_j in zip(grads[i], grads[j]):
-                    # Flatten gradients to ensure compatibility
-                    if g_i.shape != g_j.shape:
-                        continue  # Skip incompatible gradients
+        for j in range(i + 1, len(grads)):  # Avoid duplicate comparisons
+            for g_i, g_j in zip(grads[i], grads[j]):
+                if g_i.shape != g_j.shape:  # Ensure gradients are compatible
+                    continue
 
-                    # Compute dot product
-                    dot_product = torch.sum(g_i * g_j)
+                dot_product = torch.sum(g_i * g_j)
 
-                    # Check for conflict (negative dot product)
-                    if dot_product < 0:
-                        # Resolve conflict by projecting g_i onto the normal plane of g_j
-                        projection = (dot_product / (torch.norm(g_j)**2 + 1e-8)) * g_j
-                        g_i -= projection
+                if dot_product < -1e-5:  # Only resolve major conflicts
+                    projection = (dot_product / (torch.norm(g_j) ** 2 + 1e-8)) * g_j
+                    g_i -= projection
 
-    # Apply resolved gradients
+    # Apply aggregated gradients
     optimizer.zero_grad()
     for param, *g in zip(model.parameters(), *grads):
-        if param.requires_grad:  # Only update trainable parameters
-            param.grad = torch.stack(g).mean(dim=0)  # Aggregate modified gradients
+        if param.requires_grad and g:  # Ensure valid updates
+            param.grad = sum(g) / len(g)  # Safe aggregation
 
 
 def train(args):
