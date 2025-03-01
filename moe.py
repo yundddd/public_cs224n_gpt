@@ -702,7 +702,7 @@ def get_args():
     parser.add_argument("--use_pcgrad", action='store_true')
     parser.add_argument("--full_finetune", action='store_true')
 
-    parser.add_argument("--weight_decay", type=int, default=0.01)
+    parser.add_argument("--weight_decay", type=float, default=0)
 
     parser.add_argument("--num_moe_layers", type=int, default=1)
     parser.add_argument("--expert_hidden_size", type=int, default=128)
@@ -841,7 +841,6 @@ if __name__ == "__main__":
         with wandb.init(
             project="cs224n",
             config=args,
-            name=f"{args.model_size}-{dwa}-{pcgrad}-{args.num_moe_layers}moe-{args.num_experts}exp-{args.expert_hidden_size}eh-{args.aux_loss_weight}aux-{args.weight_decay}wd-{args.lr}lr"
         ):
             dwa = "1dwa" if args.use_dwa else "0dwa"
             pcgrad = "1pcgrad" if args.use_pcgrad else "0pcgrad"
