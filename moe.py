@@ -25,6 +25,8 @@ from tqdm import tqdm
 from itertools import cycle
 import wandb
 import os
+import signal
+import sys
 # nobody cares about security
 os.environ['WANDB_API_KEY'] = 'd8e70c9cb01a88ace48a2ec6d18bd9e9be24c73b'
 os.environ['WANDB_ENTITY'] = 'yundddd-stanford-university'
@@ -684,6 +686,7 @@ def get_args():
     parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--use_gpu", action='store_true')
     parser.add_argument("--debug", action='store_true')
+    parser.add_argument("--sweep", action='store_true')
 
     parser.add_argument(
         "--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int,
@@ -730,10 +733,96 @@ def add_arguments(args):
 
 
 def add_arg_from_wandb_config(args, config):
-    pass
+    args.lr = config.lr
+    args.num_moe_layers = config.num_moe_layers
+    args.expert_hidden_size = config.expert_hidden_size
+    args.num_experts = config.num_experts
+    args.aux_loss_weight = config.aux_loss_weight
+    args.weight_decay = config.weight_decay
+    args.use_dwa = config.use_dwa
+    args.use_pcgrad = config.use_pcgrad
+    args.model_size = config.model_size
+    args.batch_size = config.batch_size
+    args.epochs = config.epochs
 
+    return args
+
+
+def make_sweep_config():
+    sweep_config = {
+        'method': 'grid',
+        'parameters': {
+            'lr': {
+                'values': [1e-5, 1.5e-4, 1e-4, 1.5e-3]
+            },
+            'num_moe_layers': {
+                'values': [1, 2]
+            },
+            'expert_hidden_size': {
+                'values': [64, 128]
+            },
+            'num_experts': {
+                'values': [2, 3, 4, 5]
+            },
+            'aux_loss_weight': {
+                'values': [0.001, 0.01, 0.1]
+            },
+            'weight_decay': {
+                'values': [0.01, 0.1, 0.2]
+            },
+            'use_dwa': {
+                'values': [True, False]
+            },
+            'use_pcgrad': {
+                'values': [True, False]
+            },
+            'model_size': {
+                'values': ['gpt2', 'gpt2-medium']
+            },
+            'batch_size': {
+                'values': [18]
+            },
+            'epochs': {
+                'values': [15]
+            },
+        }
+    }
+    metric = {
+        'name': 'average score',
+        'goal': 'maximize'
+    }
+
+    sweep_config['metric'] = metric
+    return sweep_config
+
+
+def train_wrapper(args):
+    with wandb.init(
+        project="cs224n",
+        config=wandb.config,
+        name=f"{args.model_size}-{dwa}-{pcgrad}-{args.num_moe_layers}moe-{args.num_experts}exp-{args.expert_hidden_size}eh-{args.aux_loss_weight}aux-{args.weight_decay}wd-{args.lr}lr"
+    ):
+        args = add_arg_from_wandb_config(args, wandb.config)
+
+        print("=======args========")
+        print(args)
+        wandb.run.log_code(include_fn=lambda path: path.endswith(".py"))
+        train(args)
+
+
+def signal_handler(sig, frame):
+    print("Run interrupted! Marking as failed.")
+    wandb.finish(exit_code=1)  # Ensures W&B logs it as failed
+    sys.exit(1)
+
+
+signal.signal(signal.SIGINT, signal_handler)  # Handle Ctrl+C
 
 if __name__ == "__main__":
+    ### new sweep ###
+    # sweep_config = make_sweep_config()
+    # sweep_id = wandb.sweep(sweep_config, project="cs224n")
+
     args = get_args()
     args.filepath = f'{args.epochs}-{args.lr}-moe.pt'  # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
@@ -741,10 +830,14 @@ if __name__ == "__main__":
     dwa = "1dwa" if args.use_dwa else "0dwa"
     pcgrad = "1pcgrad" if args.use_pcgrad else "0pcgrad"
 
-    with wandb.init(
-        project="cs224n",
-        config=wandb.config,
-        name=f"{args.model_size}-{dwa}-{pcgrad}-{args.num_moe_layers}moe-{args.num_experts}exp-{args.expert_hidden_size}eh-{args.aux_loss_weight}aux-{args.weight_decay}wd-{args.lr}lr"
-    ):
-        wandb.run.log_code(include_fn=lambda path: path.endswith(".py"))
-        train(args)
+    if args.sweep:
+        wandb.agent("cs224n/g1g8fuma", function=lambda: train_wrapper(args))
+
+    else:
+        with wandb.init(
+            project="cs224n",
+            config=args,
+            name=f"{args.model_size}-{dwa}-{pcgrad}-{args.num_moe_layers}moe-{args.num_experts}exp-{args.expert_hidden_size}eh-{args.aux_loss_weight}aux-{args.weight_decay}wd-{args.lr}lr"
+        ):
+            wandb.run.log_code(include_fn=lambda path: path.endswith(".py"))
+            train(args)
