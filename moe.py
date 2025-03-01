@@ -759,16 +759,16 @@ def make_sweep_config():
                 'values': [1, 2]
             },
             'expert_hidden_size': {
-                'values': [64, 128]
+                'values': [32, 64, 128]
             },
             'num_experts': {
-                'values': [2, 3, 4, 5]
+                'values': [2, 3, 4]
             },
             'aux_loss_weight': {
                 'values': [0.001, 0.01, 0.1]
             },
             'weight_decay': {
-                'values': [0.01, 0.1, 0.2]
+                'values': [0, 10, 30]
             },
             'use_dwa': {
                 'values': [True, False]
@@ -829,13 +829,14 @@ if __name__ == "__main__":
     ### new sweep ###
     # sweep_config = make_sweep_config()
     # sweep_id = wandb.sweep(sweep_config, project="cs224n")
+    # sys.exit(0)
 
     args = get_args()
     args.filepath = f'{args.epochs}-{args.lr}-moe.pt'  # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
 
     if args.sweep:
-        wandb.agent("cs224n/g1g8fuma", function=lambda: train_wrapper(args))
+        wandb.agent("cs224n/spi8nu4b", function=lambda: train_wrapper(args))
 
     else:
         with wandb.init(
