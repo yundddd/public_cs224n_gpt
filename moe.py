@@ -836,7 +836,7 @@ if __name__ == "__main__":
     seed_everything(args.seed)  # Fix the seed for reproducibility.
 
     if args.sweep:
-        wandb.agent("cs224n/spi8nu4b", function=lambda: train_wrapper(args))
+        wandb.agent("cs224n/123y2y4v", function=lambda: train_wrapper(args))
 
     else:
         with wandb.init(
