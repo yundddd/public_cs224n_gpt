@@ -803,6 +803,8 @@ def train_wrapper(args):
     ):
         args = add_arg_from_wandb_config(args, wandb.config)
 
+        dwa = "1dwa" if args.use_dwa else "0dwa"
+        pcgrad = "1pcgrad" if args.use_pcgrad else "0pcgrad"
         wandb.run.name = (
             f"{args.model_size}-{dwa}-{pcgrad}-"
             f"{args.num_moe_layers}moe-{args.num_experts}exp-"
@@ -832,9 +834,6 @@ if __name__ == "__main__":
     args.filepath = f'{args.epochs}-{args.lr}-moe.pt'  # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
 
-    dwa = "1dwa" if args.use_dwa else "0dwa"
-    pcgrad = "1pcgrad" if args.use_pcgrad else "0pcgrad"
-
     if args.sweep:
         wandb.agent("cs224n/g1g8fuma", function=lambda: train_wrapper(args))
 
@@ -844,5 +843,13 @@ if __name__ == "__main__":
             config=args,
             name=f"{args.model_size}-{dwa}-{pcgrad}-{args.num_moe_layers}moe-{args.num_experts}exp-{args.expert_hidden_size}eh-{args.aux_loss_weight}aux-{args.weight_decay}wd-{args.lr}lr"
         ):
+            dwa = "1dwa" if args.use_dwa else "0dwa"
+            pcgrad = "1pcgrad" if args.use_pcgrad else "0pcgrad"
+            wandb.run.name = (
+                f"{args.model_size}-{dwa}-{pcgrad}-"
+                f"{args.num_moe_layers}moe-{args.num_experts}exp-"
+                f"{args.expert_hidden_size}eh-{args.aux_loss_weight}aux-"
+                f"{args.weight_decay}wd-{args.lr}lr"
+            )
             wandb.run.log_code(include_fn=lambda path: path.endswith(".py"))
             train(args)
