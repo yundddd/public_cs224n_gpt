@@ -800,10 +800,15 @@ def train_wrapper(args):
     with wandb.init(
         project="cs224n",
         config=wandb.config,
-        name=f"{args.model_size}-{dwa}-{pcgrad}-{args.num_moe_layers}moe-{args.num_experts}exp-{args.expert_hidden_size}eh-{args.aux_loss_weight}aux-{args.weight_decay}wd-{args.lr}lr"
     ):
         args = add_arg_from_wandb_config(args, wandb.config)
 
+        wandb.run.name = (
+            f"{args.model_size}-{dwa}-{pcgrad}-"
+            f"{args.num_moe_layers}moe-{args.num_experts}exp-"
+            f"{args.expert_hidden_size}eh-{args.aux_loss_weight}aux-"
+            f"{args.weight_decay}wd-{args.lr}lr"
+        )
         print("=======args========")
         print(args)
         wandb.run.log_code(include_fn=lambda path: path.endswith(".py"))
