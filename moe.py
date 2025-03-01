@@ -788,7 +788,7 @@ def make_sweep_config():
         }
     }
     metric = {
-        'name': 'average score',
+        'name': 'weighted_score',
         'goal': 'maximize'
     }
 
