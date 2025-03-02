@@ -90,7 +90,7 @@ class MoEGPT(nn.Module):
             return param.device
 
     @torch.no_grad()
-    def generate(self, encoding, temperature=0.7, top_p=0.9, top_k=50, max_length=128):
+    def generate(self, encoding, temperature=1, top_p=0.9, top_k=50, max_length=128):
         """
         Generates text using a combination of top-k and top-p (nucleus) sampling with temperature.
         """
@@ -396,16 +396,14 @@ class DynamicWeightAveraging:
         return weights
 
 
-def pcgrad_backward(model, losses, optimizer):
+def pcgrad_backward(model, losses, optimizer, scale_factor=1.5):
     """
-    This function implements the PCGrad algorithm from the paper:
-    "Gradient Surgery for Multi-Task Learning" (Liu et al
-    https://arxiv.org/abs/2001.06782).
-    The only modification is to skip gradient shapes that are not compatible.
-    For example, different tasks may have different detection heads. However,
-    shared backbone like MoE layers can still participate in conflict resolution.
+    Implements PCGrad with improvements:
+    - Keeps track of real gradient updates.
+    - Prevents overwriting gradients.
+    - Adds a scale factor to avoid vanishing gradients.
     """
-    optimizer.zero_grad()  # Clear gradients before computing new ones
+    optimizer.zero_grad()  # Clear old gradients
 
     # Store gradients for each task
     grads = []
@@ -414,25 +412,24 @@ def pcgrad_backward(model, losses, optimizer):
             loss.backward(retain_graph=True)  # Compute task-specific gradient
             grads.append([p.grad.clone()
                          for p in model.parameters() if p.grad is not None])
+            optimizer.zero_grad()  # Reset for next task's gradients
 
-    # Resolve gradient conflicts
+    # Resolve conflicts via gradient projection
     for i in range(len(grads)):
         for j in range(i + 1, len(grads)):  # Avoid duplicate comparisons
             for g_i, g_j in zip(grads[i], grads[j]):
-                if g_i.shape != g_j.shape:  # Ensure gradients are compatible
+                if g_i.shape != g_j.shape:  # Ensure gradients match
                     continue
 
                 dot_product = torch.sum(g_i * g_j)
-
                 if dot_product < -1e-5:  # Only resolve major conflicts
                     projection = (dot_product / (torch.norm(g_j) ** 2 + 1e-8)) * g_j
-                    g_i -= projection
+                    g_i -= scale_factor * projection  # Apply scaled correction
 
-    # Apply aggregated gradients
-    optimizer.zero_grad()
-    for param, *g in zip(model.parameters(), *grads):
-        if param.requires_grad and g:  # Ensure valid updates
-            param.grad = sum(g) / len(g)  # Safe aggregation
+    # Apply aggregated gradients to model parameters
+    for param, grad_list in zip(model.parameters(), zip(*grads)):
+        if param.requires_grad:
+            param.grad = sum(grad_list) / len(grad_list)  # Aggregate correctly
 
 
 def train(args):
