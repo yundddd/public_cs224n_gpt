@@ -396,7 +396,7 @@ class DynamicWeightAveraging:
         return weights
 
 
-def pcgrad_backward(model, losses, optimizer, scale_factor=1.5):
+def pcgrad_backward(model, losses, optimizer, scale_factor=1.0):
     """
     Implements PCGrad with improvements:
     - Keeps track of real gradient updates.
@@ -422,14 +422,14 @@ def pcgrad_backward(model, losses, optimizer, scale_factor=1.5):
                     continue
 
                 dot_product = torch.sum(g_i * g_j)
-                if dot_product < -1e-5:  # Only resolve major conflicts
+                if dot_product < 0:  # Resolve all negative conflicts
                     projection = (dot_product / (torch.norm(g_j) ** 2 + 1e-8)) * g_j
                     g_i -= scale_factor * projection  # Apply scaled correction
 
     # Apply aggregated gradients to model parameters
     for param, grad_list in zip(model.parameters(), zip(*grads)):
         if param.requires_grad:
-            param.grad = sum(grad_list) / len(grad_list)  # Aggregate correctly
+            param.grad = sum(grad_list)  # Sum gradients instead of averaging
 
 
 def train(args):
@@ -545,10 +545,6 @@ def evaluate_model(
         sentiment_task_dataloaders, device):
     """Evaluate model on all tasks."""
     if args.debug:
-        sonnet_dev_acc = model_eval_sonnet(
-            sonnet_task_dataloaders["dev_held_out"],
-            sonnet_task_dataloaders["dev_label_path"],
-            model, device, args.temperature, args.top_p, mode="dev") / 100
         return 0, 0, 0, 0, 0, 0  # Skip evaluation in debug mode
     para_dev_acc, *_ = model_eval_paraphrase(
         para_task_dataloaders["dev"],
