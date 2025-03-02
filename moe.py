@@ -339,90 +339,124 @@ def sonnet_task_train(batch, model, device):
 class DynamicWeightAveraging:
     """
     Implements Dynamic Weight Averaging (DWA) for multi-task learning from Liu et al. (2019).
-    The only difference is to assign zero weights for tasks that are skipped in the current
-    iteration due to dataset imbalance.
+    Key changes:
+    - Track average of past losses (not just previous loss).
+    - Compute loss ratio as current_loss / average_past_loss.
+    - Handle initialization correctly.
     """
 
     def __init__(self, num_tasks, T=2.0):
-        """
-        Implements Dynamic Weight Averaging (DWA) for multi-task learning from Liu et al. (2019).
-
-        Args:
-            num_tasks (int): Number of tasks.
-            T (float): Temperature parameter for weight distribution.
-        """
         self.num_tasks = num_tasks
         self.T = T
-        self.prev_losses = [1.0] * num_tasks  # Initialize with dummy values
+        self.avg_losses = None  # Initialize after first iteration
+        self.step = 0  # Track number of updates
 
     def get_weights(self, current_losses):
-        eps = 1e-8  # Avoid division by zero
-
-        # Only consider tasks with non-zero losses
+        eps = 1e-8
         valid_indices = [i for i, l in enumerate(current_losses) if l.item() > 0]
 
-        if not valid_indices:  # Handle edge case where all tasks are skipped
-            return torch.ones(self.num_tasks) / self.num_tasks
+        if not valid_indices:
+            return torch.zeros(self.num_tasks)  # Zero weights if all tasks skipped
 
-        valid_loss_ratios = [
-            self.prev_losses[i] / (current_losses[i].item() + eps)
-            for i in valid_indices
-        ]
+        # Initialize avg_losses on first call
+        if self.avg_losses is None:
+            self.avg_losses = [l.item() for l in current_losses]
 
-        # Normalize with softmax over valid indices only
-        exps = torch.exp(torch.tensor(valid_loss_ratios) / self.T)
+        # Compute loss ratios for valid tasks
+        loss_ratios = []
+        for i in valid_indices:
+            current_loss = current_losses[i].item()
+            avg_past_loss = self.avg_losses[i]
+            ratio = current_loss / (avg_past_loss + eps)
+            loss_ratios.append(ratio)
+
+        # Compute weights via softmax over valid indices
+        exps = torch.exp(torch.tensor(loss_ratios) / self.T)
         valid_weights = exps / exps.sum()
 
-        # Assign weights to all tasks (zero for skipped tasks)
+        # Assign weights to all tasks (zero for skipped)
         weights = torch.zeros(self.num_tasks)
         for idx, w in zip(valid_indices, valid_weights):
             weights[idx] = w
 
-        # Update previous losses only for non-zero tasks
+        # Update average losses for valid tasks
+        self.step += 1
         for i in valid_indices:
-            self.prev_losses[i] = max(current_losses[i].item(), eps)
+            current_loss = current_losses[i].item()
+            # EMA-like update: avg = (prev_avg * (step-1) + current_loss) / step
+            self.avg_losses[i] = (
+                self.avg_losses[i] * (self.step - 1) + current_loss) / self.step
 
         return weights
 
 
-def pcgrad_backward(model, losses, optimizer, scale_factor=1.0):
+def pcgrad_backward(model, losses, optimizer, task_weights=None, scale_factor=1.0):
     """
-    Implements PCGrad with improvements:
-    - Keeps track of real gradient updates.
-    - Prevents overwriting gradients.
-    - Adds a scale factor to avoid vanishing gradients.
-    """
-    optimizer.zero_grad()  # Clear old gradients
+    Implements PCGrad with DWA weights applied after conflict resolution.
 
-    # Store gradients for each task
+    Args:
+        model: The multi-task model.
+        losses: List of task losses.
+        optimizer: The optimizer.
+        task_weights: List of weights from DWA (one per task).
+        scale_factor: Scaling factor for gradient projection.
+    """
+    optimizer.zero_grad()
+
+    # Convert model.parameters() to a list for indexing
+    params = list(model.parameters())
+
+    # Collect gradients for ALL parameters, even if unused by a task
     grads = []
     for loss in losses:
-        if loss.grad_fn is not None:
-            loss.backward(retain_graph=True)  # Compute task-specific gradient
-            grads.append([p.grad.clone()
-                         for p in model.parameters() if p.grad is not None])
-            optimizer.zero_grad()  # Reset for next task's gradients
+        if loss.grad_fn is None:
+            # If task is skipped, append zero gradients for all parameters
+            grads.append([torch.zeros_like(p) for p in params])
+            continue
 
-    # Resolve conflicts via gradient projection
+        loss.backward(retain_graph=True)
+        task_grads = []
+        for p in params:
+            if p.grad is not None:
+                task_grads.append(p.grad.clone())
+            else:
+                # Explicitly track unused parameters with zero gradients
+                task_grads.append(torch.zeros_like(p))
+        grads.append(task_grads)
+        optimizer.zero_grad()
+
+    # Resolve conflicts parameter-wise
     for i in range(len(grads)):
-        for j in range(i + 1, len(grads)):  # Avoid duplicate comparisons
-            for g_i, g_j in zip(grads[i], grads[j]):
-                if g_i.shape != g_j.shape:  # Ensure gradients match
-                    continue
+        for j in range(i + 1, len(grads)):
+            for param_idx in range(len(params)):
+                g_i = grads[i][param_idx]
+                g_j = grads[j][param_idx]
+
+                if g_i.shape != g_j.shape:
+                    continue  # Skip parameters with mismatched shapes
 
                 dot_product = torch.sum(g_i * g_j)
-                if dot_product < 0:  # Resolve all negative conflicts
-                    projection = (dot_product / (torch.norm(g_j) ** 2 + 1e-8)) * g_j
-                    g_i -= scale_factor * projection  # Apply scaled correction
+                if dot_product < 0:
+                    projection = (dot_product / (torch.norm(g_j)**2 + 1e-8)) * g_j
+                    grads[i][param_idx] -= scale_factor * projection
 
-    # Apply aggregated gradients to model parameters
-    for param, grad_list in zip(model.parameters(), zip(*grads)):
+    # Apply DWA weights to the resolved gradients
+    if task_weights is not None:
+        if len(task_weights) != len(grads):
+            raise ValueError(
+                f"task_weights length ({len(task_weights)}) does not match number of tasks ({len(grads)})")
+
+        for task_idx, weight in enumerate(task_weights):
+            for param_idx in range(len(params)):
+                grads[task_idx][param_idx] *= weight
+
+    # Sum gradients across tasks for each parameter
+    for param_idx, param in enumerate(params):
         if param.requires_grad:
-            param.grad = sum(grad_list)  # Sum gradients instead of averaging
+            param.grad = sum(task_grads[param_idx] for task_grads in grads)
 
 
 def train(args):
-    """Train GPT-2 for paraphrase detection on the Quora dataset."""
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
     # paraphrase task
     para_task_dataloaders = get_paraphrase_task_dataloaders(args)
@@ -441,7 +475,7 @@ def train(args):
     for epoch in range(args.epochs):
         model.train()
         paraphrase_task_loss, sonnet_train_loss, sentiment_train_loss = 0, 0, 0
-        num_batches_paraphrase, num_batches_sonnet, num_batches_sentiment = 0, 0, 0
+        num_batches = {'para': 0, 'sonnet': 0, 'sentiment': 0}
 
         combined_loader = MultitaskLoader(
             para_task_dataloaders["train"],
@@ -453,54 +487,65 @@ def train(args):
                 desc=f"Epoch {epoch + 1} /{args.epochs} "):
             optimizer.zero_grad()
 
-            main_batch = batch['main']
-            sonnet_batch = batch['aux1']
-            sentiment_batch = batch['aux2']
+            # Compute losses for active tasks
+            current_losses = []
+            active_tasks = []
 
-            # task 1
-            paraphrase_loss, paraphrase_aux_loss = paraphrase_task_train(
-                main_batch, model, device)
-            total_para_loss = paraphrase_loss + paraphrase_aux_loss
-            num_batches_paraphrase += 1
+            # --- Paraphrase task ---
+            if 'main' in batch:
+                loss, aux_loss = paraphrase_task_train(batch['main'], model, device)
+                total_para_loss = loss + aux_loss
+                current_losses.append(total_para_loss)
+                active_tasks.append(0)
+                num_batches['para'] += 1
+            else:
+                current_losses.append(torch.tensor(0.0, device=device))
 
-            total_sonnet_loss = torch.tensor(0.0, device=device)
-            if sonnet_batch is not None:
-                sonnet_task_loss, sonnet_aux_loss = sonnet_task_train(
-                    sonnet_batch, model, device)
-                total_sonnet_loss = sonnet_task_loss + sonnet_aux_loss
-                num_batches_sonnet += 1
+            # --- Sonnet task ---
+            if 'aux1' in batch and batch['aux1'] is not None:
+                loss, aux_loss = sonnet_task_train(batch['aux1'], model, device)
+                total_sonnet_loss = loss + aux_loss
+                current_losses.append(total_sonnet_loss)
+                active_tasks.append(1)
+                num_batches['sonnet'] += 1
+            else:
+                current_losses.append(torch.tensor(0.0, device=device))
 
-            total_sentiment_loss = torch.tensor(0.0, device=device)
-            if sentiment_batch is not None:
-                sentiment_task_loss, sentiment_task_aux_loss = sentiment_task_train(
-                    sentiment_batch,
-                    model,
-                    device)
-                total_sentiment_loss = sentiment_task_loss + sentiment_task_aux_loss
-                num_batches_sentiment += 1
+            # --- Sentiment task ---
+            if 'aux2' in batch and batch['aux2'] is not None:
+                loss, aux_loss = sentiment_task_train(batch['aux2'], model, device)
+                total_sentiment_loss = loss + aux_loss
+                current_losses.append(total_sentiment_loss)
+                active_tasks.append(2)
+                num_batches['sentiment'] += 1
+            else:
+                current_losses.append(torch.tensor(0.0, device=device))
 
-            current_losses = [total_para_loss, total_sonnet_loss, total_sentiment_loss]
-
+            # Get DWA weights (only for active tasks)
             if args.use_dwa:
                 task_weights = dwa.get_weights(current_losses)
-                for loss, weight in zip(current_losses, task_weights):
-                    loss *= weight
-
-            if args.use_pcgrad:
-                pcgrad_backward(model, current_losses, optimizer)
             else:
-                total_loss = sum(current_losses)
+                task_weights = torch.ones(3, device=device)
+
+            # Apply PCGrad or standard backward
+            if args.use_pcgrad:
+                pcgrad_backward(model, current_losses, optimizer, task_weights)
+            else:
+                total_loss = sum(loss * weight for loss,
+                                 weight in zip(current_losses, task_weights))
                 total_loss.backward()
 
             optimizer.step()
 
-            paraphrase_task_loss += total_para_loss.item()
-            sonnet_train_loss += total_sonnet_loss.item()
-            sentiment_train_loss += total_sentiment_loss.item()
+            # Log losses
+            paraphrase_task_loss += current_losses[0].item()
+            sonnet_train_loss += current_losses[1].item()
+            sentiment_train_loss += current_losses[2].item()
 
-        paraphrase_task_loss = paraphrase_task_loss/num_batches_paraphrase
-        sonnet_train_loss = sonnet_train_loss/num_batches_sonnet
-        sentiment_train_loss = sentiment_train_loss/num_batches_sentiment
+        # Average losses
+        paraphrase_task_loss /= num_batches['para'] if num_batches['para'] > 0 else 1
+        sonnet_train_loss /= num_batches['sonnet'] if num_batches['sonnet'] > 0 else 1
+        sentiment_train_loss /= num_batches['sentiment'] if num_batches['sentiment'] > 0 else 1
 
         # evaluate model
         para_dev_acc, para_train_acc, sonnet_dev_acc, sonnet_train_acc, sentiment_dev_acc, sentiment_train_acc = evaluate_model(
