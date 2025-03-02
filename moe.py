@@ -472,6 +472,9 @@ def train(args):
     dwa = DynamicWeightAveraging(num_tasks=3, T=2.0)
 
     best_score = 0
+    patience = 5  # Number of epochs to wait for improvement
+    no_improvement_counter = 0  # Counter for epochs without improvement
+
     for epoch in range(args.epochs):
         model.train()
         paraphrase_task_loss, sonnet_train_loss, sentiment_train_loss = 0, 0, 0
@@ -558,9 +561,16 @@ def train(args):
             weighted_score = 3 / (1 / para_dev_acc + 1 / sonnet_dev_acc + 1 /
                                   sentiment_dev_acc)
 
-        if weighted_score > best_score and not args.debug:
-            save_model(model, optimizer, args, args.filepath)
+        # Early termination logic
+        if weighted_score > best_score:
+            print(
+                f"Validation score improved from {best_score:.3f} to {weighted_score:.3f}")
             best_score = weighted_score
+            no_improvement_counter = 0  # Reset patience counter
+        else:
+            no_improvement_counter += 1
+            print(
+                f"No improvement in validation score for {no_improvement_counter} epochs (best: {best_score:.3f})")
 
         print(
             f"paraphrase_loss: {paraphrase_task_loss:.3f}, sonnet_loss: {sonnet_train_loss:.3f}, sentiment_loss: {sentiment_train_loss:.3f} para dev acc :: {para_dev_acc:.3f}, sonnet dev acc :: {sonnet_dev_acc:.3f}, sentiment dev acc :: {sentiment_dev_acc:.3f}")
@@ -572,6 +582,11 @@ def train(args):
                  "para_train_acc": para_train_acc, "sonnet_train_acc": sonnet_train_acc,
                  "sentiment_train_acc": sentiment_train_acc, "best_score": best_score,
                  "weighted_score": weighted_score, "epoch": epoch})
+
+         # Stop training if patience is exhausted
+        if no_improvement_counter >= patience:
+            print(f"Early termination: No improvement for {patience} epochs.")
+            return
 
 
 def evaluate_model(
@@ -784,22 +799,22 @@ def make_sweep_config():
         'method': 'grid',
         'parameters': {
             'lr': {
-                'values': [1e-5, 1.5e-4, 1e-4, 1.5e-3]
+                'values': [1.5e-4, 1e-3]
             },
             'num_moe_layers': {
                 'values': [1, 2]
             },
             'expert_hidden_size': {
-                'values': [32, 64, 128]
+                'values': [32, 128]
             },
             'num_experts': {
                 'values': [2, 3, 4]
             },
             'aux_loss_weight': {
-                'values': [0.001, 0.01, 0.1]
+                'values': [0.001, 0.01]
             },
             'weight_decay': {
-                'values': [0, 10, 30]
+                'values': [0, 1]
             },
             'use_dwa': {
                 'values': [True, False]
