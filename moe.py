@@ -91,58 +91,47 @@ class MoEGPT(nn.Module):
 
     @torch.no_grad()
     def generate(self, encoding, temperature=1, top_p=0.9, top_k=50, max_length=128):
-        """
-        Generates text using a combination of top-k and top-p (nucleus) sampling with temperature.
-        """
         device = self.get_device()
         token_ids = encoding.to(device)
         attention_mask = torch.ones_like(token_ids, dtype=torch.int64).to(device)
 
         for _ in range(max_length):
-            # Forward pass to get logits
             logits_last_token = self.forward(token_ids, attention_mask)[
                 "next_token_logits"][:, -1, :] / temperature
-
-            # Convert logits to probabilities
             probs = torch.nn.functional.softmax(logits_last_token, dim=-1)
 
-            # **Sort probabilities and indices**
+            # Sort probabilities and indices
             sorted_probs, sorted_indices = torch.sort(probs, descending=True)
 
-            # **Top-k filtering**
+            # Apply top-k filtering
             if top_k > 0:
-                sorted_probs[:, top_k:] = 0  # Zero out probabilities beyond top-k
+                sorted_probs[:, top_k:] = 0
 
-            # **Top-p filtering (Nucleus Sampling)**
+            # Apply top-p (nucleus) sampling
             cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-            sorted_probs = sorted_probs.masked_fill(cumulative_probs > top_p, 0)
+            mask = (cumulative_probs - sorted_probs) < top_p  # Correct mask
+            sorted_probs = sorted_probs.masked_fill(~mask, 0.0)
 
-            # **Ensure at least one valid token remains**
+            # Ensure at least one valid token remains
             if sorted_probs.sum(dim=-1).min() == 0:
-                sorted_probs[:, 0] = 1  # Assign probability to the highest-ranked token
+                sorted_probs[:, 0] = 1
 
-            # **Re-normalize probabilities**
-            # Avoid division by zero
+            # Re-normalize and sample
             sorted_probs /= sorted_probs.sum(dim=-1, keepdim=True)
-
-            # **Sample from filtered distribution**
             sampled_index = torch.multinomial(sorted_probs, 1)
             sampled_token = sorted_indices.gather(dim=-1, index=sampled_index)
 
-            # Append sampled token
+            # Update token_ids and attention_mask
             token_ids = torch.cat([token_ids, sampled_token], dim=1)
             attention_mask = torch.cat(
                 [attention_mask, torch.ones_like(sampled_token)], dim=1)
 
-            # Stop if EOS token is generated
             if sampled_token.item() == self.tokenizer.eos_token_id:
                 break
 
-        # Decode generated tokens
         generated_output = self.tokenizer.decode(
             token_ids[0].cpu().numpy().tolist(),
             skip_special_tokens=True)
-
         return token_ids, generated_output
 
 
@@ -544,7 +533,7 @@ def evaluate_model(
         args, model, para_task_dataloaders, sonnet_task_dataloaders,
         sentiment_task_dataloaders, device):
     """Evaluate model on all tasks."""
-    if args.debug:
+    if args.debug or args.no_eval:
         return 0, 0, 0, 0, 0, 0  # Skip evaluation in debug mode
     para_dev_acc, *_ = model_eval_paraphrase(
         para_task_dataloaders["dev"],
@@ -682,6 +671,7 @@ def get_args():
     parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--use_gpu", action='store_true')
     parser.add_argument("--debug", action='store_true')
+    parser.add_argument("--no_eval", action='store_true')
     parser.add_argument("--sweep", action='store_true')
 
     parser.add_argument(
