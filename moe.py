@@ -859,6 +859,8 @@ def train_wrapper(args):
         )
         print("=======args========")
         print(args)
+        if args.model_size == "gpt2-medium":
+            return
         wandb.run.log_code(include_fn=lambda path: path.endswith(".py"))
         train(args)
 
