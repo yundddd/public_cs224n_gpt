@@ -859,8 +859,6 @@ def train_wrapper(args):
         )
         print("=======args========")
         print(args)
-        if args.model_size == "gpt2-medium":
-            return
         wandb.run.log_code(include_fn=lambda path: path.endswith(".py"))
         train(args)
 
@@ -884,7 +882,7 @@ if __name__ == "__main__":
     seed_everything(args.seed)  # Fix the seed for reproducibility.
 
     if args.sweep:
-        wandb.agent("cs224n/yi4eqp6r", function=lambda: train_wrapper(args))
+        wandb.agent("cs224n/1bp0douk", function=lambda: train_wrapper(args))
 
     else:
         with wandb.init(
