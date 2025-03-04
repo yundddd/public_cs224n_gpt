@@ -437,7 +437,8 @@ if __name__ == "__main__":
         fine_tune_mode=args.fine_tune_mode,
         dev_out='predictions/' + args.fine_tune_mode + '-cfimdb-dev-out.csv',
         test_out='predictions/' + args.fine_tune_mode + '-cfimdb-test-out.csv',
-        use_flash_attention = args.use_flash_attention
+        use_flash_attention = args.use_flash_attention,
+        use_lora = args.use_lora,
     )
 
     train(config)

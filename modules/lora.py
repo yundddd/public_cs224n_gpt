@@ -10,14 +10,14 @@ class LoRALinear(nn.Module):
         self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
         self.scale = alpha / rank
         
-        # Initialize LoRA weights
-        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
-        nn.init.zeros_(self.lora_B)
+        # Improved initialization
+        nn.init.normal_(self.lora_A, std=1/math.sqrt(in_features))
+        nn.init.zeros_(self.lora_B)  # Keep output disabled at init
         
-        # Freeze the original weights
-        self.linear.weight.requires_grad = False
+        # Freeze base weights
+        self.linear.weight.requires_grad_(False)
         if self.linear.bias is not None:
-            self.linear.bias.requires_grad = False
+            self.linear.bias.requires_grad_(False)
 
     def forward(self, x):
         base_output = self.linear(x)
