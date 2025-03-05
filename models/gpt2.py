@@ -5,6 +5,7 @@ from transformers import GPT2Model as OpenAIGPT2Model
 from config import GPT2Config
 from models.base_gpt import GPTPreTrainedModel
 from modules.gpt2_layer import GPT2Layer
+from modules.lora import LoRALinear
 from utils import get_extended_attention_mask
 
 
@@ -121,7 +122,7 @@ class GPT2Model(GPTPreTrainedModel):
             GPT2Config(
                 hidden_size=d, num_hidden_layers=l,
                 num_attention_heads=num_heads, intermediate_size=d *
-                3, use_flash_attention=use_flash_attention, **kwargs)).eval()
+                4, use_flash_attention=use_flash_attention, **kwargs)).eval()
 
         # Load word and positional embeddings.
         our_model.word_embedding.load_state_dict(gpt_model.wte.state_dict())
@@ -144,11 +145,16 @@ class GPT2Model(GPTPreTrainedModel):
             l.self_attention.value.bias.data = gpt_model.state_dict()[
                 f'h.{i}.attn.c_attn.bias'][d * 2:]
 
-            # Remap final dense layer in MHA.
-            l.attention_dense.weight.data = gpt_model.state_dict()[
-                f'h.{i}.attn.c_proj.weight'].T
-            l.attention_dense.bias.data = gpt_model.state_dict()[
-                f'h.{i}.attn.c_proj.bias']
+            # Remap final dense layer in MHA
+            c_proj_weight = gpt_model.state_dict()[f'h.{i}.attn.c_proj.weight'].T
+            c_proj_bias = gpt_model.state_dict()[f'h.{i}.attn.c_proj.bias']
+            
+            if isinstance(l.attention_dense, LoRALinear):
+                l.attention_dense.linear.weight.data = c_proj_weight
+                l.attention_dense.linear.bias.data = c_proj_bias
+            else:
+                l.attention_dense.weight.data = c_proj_weight
+                l.attention_dense.bias.data = c_proj_bias
 
             # Remap attention layer norm.
             l.attention_layer_norm.weight.data = gpt_model.state_dict()[
@@ -156,13 +162,22 @@ class GPT2Model(GPTPreTrainedModel):
             l.attention_layer_norm.bias.data = gpt_model.state_dict()[
                 f'h.{i}.ln_1.bias']
 
-            # Remap post-attention MLP layers.
-            l.interm_dense.weight.data = gpt_model.state_dict()[
-                f'h.{i}.mlp.c_fc.weight'].T
-            l.interm_dense.bias.data = gpt_model.state_dict()[f'h.{i}.mlp.c_fc.bias']
-            l.out_dense.weight.data = gpt_model.state_dict()[
-                f'h.{i}.mlp.c_proj.weight'].T
-            l.out_dense.bias.data = gpt_model.state_dict()[f'h.{i}.mlp.c_proj.bias']
+            # Remap post-attention MLP layers
+            c_fc_weight = gpt_model.state_dict()[f'h.{i}.mlp.c_fc.weight'].T
+            c_fc_bias = gpt_model.state_dict()[f'h.{i}.mlp.c_fc.bias']
+            c_proj_weight = gpt_model.state_dict()[f'h.{i}.mlp.c_proj.weight'].T
+            c_proj_bias = gpt_model.state_dict()[f'h.{i}.mlp.c_proj.bias']
+
+            if isinstance(l.interm_dense, LoRALinear):
+                l.interm_dense.linear.weight.data = c_fc_weight
+                l.interm_dense.linear.bias.data = c_fc_bias
+                l.out_dense.linear.weight.data = c_proj_weight
+                l.out_dense.linear.bias.data = c_proj_bias
+            else:
+                l.interm_dense.weight.data = c_fc_weight
+                l.interm_dense.bias.data = c_fc_bias
+                l.out_dense.weight.data = c_proj_weight
+                l.out_dense.bias.data = c_proj_bias
 
             # Remap second layer norm weights.
             l.out_layer_norm.weight.data = gpt_model.state_dict()[f'h.{i}.ln_2.weight']
