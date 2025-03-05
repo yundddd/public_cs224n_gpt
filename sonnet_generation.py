@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import GPT2Tokenizer
 from einops import rearrange
+import time
 
 from datasets import (
     SonnetsDataset,PairwiseSonnetsDataset,
@@ -55,7 +56,8 @@ class SonnetGPT(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.gpt = GPT2Model.from_pretrained(
-            model=args.model_size, d=args.d, l=args.l, num_heads=args.num_heads)
+            model=args.model_size, d=args.d, l=args.l, num_heads=args.num_heads,
+            use_flash_attention=args.use_flash_attention)
         self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -438,6 +440,7 @@ def get_args():
         default='gpt2')
     parser.add_argument("--use_pairwise_data", action='store_true')
     parser.add_argument("--modelpath", type=str, default="")
+    parser.add_argument("--use_flash_attention", action='store_true')
     args = parser.parse_args()
     return args
 
@@ -479,5 +482,5 @@ if __name__ == "__main__":
     else:
         train(args)
     generate_submission_sonnets(args)
-    generate_low_quality_sonnets(args)
+    # generate_low_quality_sonnets(args)
     wandb.finish()

@@ -3,7 +3,7 @@ import torch
 
 from einops import rearrange
 from torch import nn
-# from flash_attn.flash_attn_interface import flash_attn_func  # Import FlashAttention
+from flash_attn.flash_attn_interface import flash_attn_func  # Import FlashAttention
 
 
 class CausalSelfAttention(nn.Module):
