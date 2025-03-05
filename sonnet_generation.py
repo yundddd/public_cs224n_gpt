@@ -24,9 +24,10 @@ from transformers import GPT2Tokenizer
 from einops import rearrange
 
 from datasets import (
-    SonnetsDataset,
+    SonnetsDataset,PairwiseSonnetsDataset,
 )
 from models.gpt2 import GPT2Model
+from evaluation import model_eval_sonnet, test_sonnet
 
 from optimizer import AdamW
 
@@ -128,19 +129,51 @@ class SonnetGPT(nn.Module):
             token_ids[0].cpu().numpy().tolist())[3:]
         return token_ids, generated_output
 
+class EarlyStopping:
+    def __init__(self, path, patience=3, delta=0, verbose=False):
+        """
+        Args:
+            patience (int): Number of epochs to wait for an improvement before stopping.
+            delta (float): Minimum change in the monitored metric to qualify as an improvement.
+            verbose (bool): Whether to print messages about the early stopping process.
+            path (str): Path to save the model checkpoint.
+        """
+        self.patience = patience
+        self.delta = delta
+        self.verbose = verbose
+        self.path = path
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.best_model = None
 
-def save_model(model, optimizer, args, filepath):
-    save_info = {
-        'model': model.state_dict(),
-        'optim': optimizer.state_dict(),
-        'args': args,
-        'system_rng': random.getstate(),
-        'numpy_rng': np.random.get_state(),
-        'torch_rng': torch.random.get_rng_state(),
-    }
+    def __call__(self, score, model, optimizer, args):
+        if self.best_score is None:
+            self.best_score = score
+            self.save_model(model, optimizer, args, self.path)
+        elif score < self.best_score - self.delta:
+            self.counter += 1
+            if self.verbose:
+                print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.save_model(model, optimizer, args, self.path)
+            self.counter = 0
 
-    torch.save(save_info, filepath)
-    print(f"save the model to {filepath}")
+    def save_model(self, model, optimizer, args, filepath):
+        save_info = {
+            'model': model.state_dict(),
+            'optim': optimizer.state_dict(),
+            'args': args,
+            'system_rng': random.getstate(),
+            'numpy_rng': np.random.get_state(),
+            'torch_rng': torch.random.get_rng_state(),
+        }
+
+        torch.save(save_info, filepath)
+        print(f"save the model to {filepath}")
 
 
 def train(args):
@@ -154,13 +187,14 @@ def train(args):
 
     # Create the held-out dataset: these only have the first 3 lines. Your job is to fill in the rest!
     held_out_sonnet_dataset = SonnetsDataset(args.held_out_sonnet_path)
-
+    dev_held_out_dataset = SonnetsDataset(args.sonnet_dev_held_out_path)
     args = add_arguments(args)
     model = SonnetGPT(args)
     model = model.to(device)
 
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr)
+    early_stopping = EarlyStopping(args.filepath, patience=3, verbose=True)
 
     # Run for the specified number of epochs.
     for epoch in range(args.epochs):
@@ -193,29 +227,113 @@ def train(args):
         print(f"Epoch {epoch}: train loss :: {train_loss:.3f}.")
         print('Generating several output sonnets...')
         model.eval()
-        for batch in held_out_sonnet_dataset:
-            encoding = model.tokenizer(batch[1],
-                                       return_tensors='pt', padding=True,
-                                       truncation=True).to(device)
-            output = model.generate(
-                encoding['input_ids'],
-                temperature=args.temperature, top_p=args.top_p)
-            print(f'{batch[1]}{output[1]}\n\n')
-            wandb.log({"input": batch[1], "output": output[1]})
-            break
-
+        # for batch in held_out_sonnet_dataset:
+        #     encoding = model.tokenizer(batch[1],
+        #                                return_tensors='pt', padding=True,
+        #                                truncation=True).to(device)
+        #     output = model.generate(
+        #         encoding['input_ids'],
+        #         temperature=args.temperature, top_p=args.top_p)
+        #     # print(f'{batch[1]}{output[1]}\n\n')
+        #     # wandb.log({"input": batch[1], "output": output[1]})
+        #     break
+        sonnet_chrd_score = model_eval_sonnet(dev_held_out_dataset,args.sonnet_dev_label_path,
+            model, device, args.temperature, args.top_p)
+        print(f"Epoch {epoch}: dev acc :: {sonnet_chrd_score:.3f}.")
         # TODO: consider a stopping condition to prevent overfitting on the small dataset of sonnets.
-        save_model(model, optimizer, args, f'{epoch}_{args.filepath}')
+        early_stopping(sonnet_chrd_score, model, optimizer, args)
 
-        wandb.log({"train_loss": train_loss, "epoch": epoch})
+        wandb.log({"train_loss": train_loss, "epoch": epoch, "CHRF score": sonnet_chrd_score})
+
+def pairwise_train(args):
+    """Train GPT-2 for paraphrase detection on the Quora dataset."""
+    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+
+    pairwise_dataset = PairwiseSonnetsDataset(args.sonnet_high_quality_path, args.sonnet_low_quality_path)
+
+    pairwise_dataloader = DataLoader(
+        pairwise_dataset, shuffle=True, batch_size=args.batch_size,
+        collate_fn=pairwise_dataset.collate_fn)
+
+    # Create the held-out dataset: these only have the first 3 lines. Your job is to fill in the rest!
+    dev_held_out_dataset = SonnetsDataset(args.sonnet_dev_held_out_path)
+    # ==========use baseline gpt2 model
+    # args = add_arguments(args)
+    # model = SonnetGPT(args)
+    # ==========use fine tuned gpt2 model
+    saved = torch.load(args.filepath, weights_only=False, map_location=torch.device('cpu'))
+    add_arguments(args)
+    model = SonnetGPT(saved['args'])
+    model.load_state_dict(saved['model'])
+    model = model.to(device)
+    sonnet_chrd_score = model_eval_sonnet(dev_held_out_dataset, args.sonnet_dev_label_path,
+                                          model, device, args.temperature, args.top_p)
+    print(f"Initial dev acc :: {sonnet_chrd_score:.3f}.")
+    lr = args.lr
+    optimizer = AdamW(model.parameters(), lr=lr)
+    early_stopping = EarlyStopping("DPO"+args.filepath, patience=3, verbose=True)
+
+    # Run for the specified number of epochs.
+    for epoch in range(args.epochs):
+        model.train()
+        train_loss = 0
+        num_batches = 0
+        for batch in tqdm(pairwise_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+            # Get the input and move it to the gpu (I do not recommend training this model on CPU).
+            prompt_ids = batch["prompt_ids"].to(device)
+            better_ids = batch["better_ids"].to(device)
+            worse_ids = batch["worse_ids"].to(device)
+            better_mask = batch["better_mask"].to(device)
+            worse_mask = batch["worse_mask"].to(device)
+
+            # Compute the loss, gradients, and update the model's parameters.
+            optimizer.zero_grad()
+            # Forward pass. We don't predict the next token, so we don't shift tokens.
+            better_logits = model(better_ids, better_mask)  # Shape: (batch_size, seq_len, vocab_size)
+            worse_logits = model(worse_ids, worse_mask)  # Shape: (batch_size, seq_len, vocab_size)
+            # Compute log probabilities over all tokens
+            better_log_probs = F.log_softmax(better_logits, dim=-1)
+            worse_log_probs = F.log_softmax(worse_logits, dim=-1)
+
+            # Compute **per-token** log probabilities for full completions
+            # Gather log probabilities for actual tokens
+            better_log_prob_seq = torch.gather(better_log_probs, 2, better_ids.unsqueeze(2)).squeeze(2)
+            worse_log_prob_seq = torch.gather(worse_log_probs, 2, worse_ids.unsqueeze(2)).squeeze(2)
+            # Normalize by sequence length (instead of summing directly)
+            better_total_log_prob = (better_log_prob_seq * better_mask).sum(dim=1) / better_mask.sum(dim=1).clamp(min=1)
+            worse_total_log_prob = (worse_log_prob_seq * worse_mask).sum(dim=1) / worse_mask.sum(dim=1).clamp(min=1)
+            # Compute DPO loss with numerical stability
+            logit_diff = better_total_log_prob - worse_total_log_prob
+            loss = -F.logsigmoid(logit_diff).mean()
+
+            # loss = F.cross_entropy(logits, labels, reduction='mean')
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item()
+            num_batches += 1
+
+        train_loss = train_loss / num_batches
+        print(f"Epoch {epoch}: train loss :: {train_loss:.3f}.")
+        print('Generating several output sonnets...')
+        model.eval()
+        sonnet_chrd_score = model_eval_sonnet(dev_held_out_dataset,args.sonnet_dev_label_path,
+            model, device, args.temperature, args.top_p)
+        print(f"Epoch {epoch}: dev acc :: {sonnet_chrd_score:.3f}.")
+        early_stopping(sonnet_chrd_score, model, optimizer, args)
+
+        # wandb.log({"train_loss": train_loss, "epoch": epoch, "CHRF score": sonnet_chrd_score})
 
 
 @torch.no_grad()
 def generate_submission_sonnets(args):
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
-    saved = torch.load(f'{args.epochs-1}_{args.filepath}', weights_only=False)
-
-    model = SonnetGPT(saved['args'])
+    # saved = torch.load(args.filepath, weights_only=False, map_location=torch.device('cpu'))
+    print("Loading model from: ",args.modelpath)
+    saved = torch.load(args.modelpath, weights_only=False, map_location=torch.device('cpu'))
+    model_args = saved['args']
+    add_arguments(model_args)
+    model = SonnetGPT(model_args)
     model.load_state_dict(saved['model'])
     model = model.to(device)
     model.eval()
@@ -244,6 +362,44 @@ def generate_submission_sonnets(args):
             f.write(f"\n{sonnet[0]}\n")
             f.write(sonnet[1])
 
+    chrf_score = test_sonnet(args.sonnet_out, "data/sonnets_label.txt")
+    print(f"Test set CHRF score: {chrf_score:.3f}")
+
+@torch.no_grad()
+def generate_low_quality_sonnets(args):
+    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+    saved = torch.load(args.filepath, weights_only=False, map_location=torch.device('cpu'))
+    model = SonnetGPT(saved['args'])
+    model.load_state_dict(saved['model'])
+    # args = add_arguments(args)
+    # model = SonnetGPT(args)
+    model = model.to(device)
+    model.eval()
+
+    # Create the held-out dataset: these only have the first 3 lines. Your job is to fill in the rest!
+    held_out_sonnet_dataset = SonnetsDataset("gpt4_sonnets_train_held_out.txt")
+
+    generated_sonnets = []
+    for batch in held_out_sonnet_dataset:
+        sonnet_id = batch[0]
+        encoding = model.tokenizer(
+            batch[1].strip()+"\n",
+            return_tensors='pt', padding=False, truncation=True).to(device)
+        output = model.generate(
+            encoding['input_ids'],
+            temperature=args.temperature, top_p=args.top_p)[0][0]
+        decoded_output = model.tokenizer.decode(output)
+        full_sonnet = f'{decoded_output}\n\n'
+        generated_sonnets.append((sonnet_id, full_sonnet))
+
+        print(f'{decoded_output}\n\n')
+
+    with open("data/low_quality_sonnet_for_gpt4.txt", "w+") as f:
+        f.write(f"--Generated Sonnets-- \n\n")
+        for sonnet in generated_sonnets:
+            f.write(f"\n{sonnet[0]}\n")
+            f.write(sonnet[1])
+
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -253,6 +409,14 @@ def get_args():
                         default="data/sonnets_held_out.txt")
     parser.add_argument("--sonnet_out", type=str,
                         default="predictions/generated_sonnets.txt")
+    parser.add_argument("--sonnet_dev_held_out_path", type=str,
+                        default="data/sonnets_dev_held_out.txt")
+    parser.add_argument("--sonnet_dev_label_path", type=str,
+                        default="data/sonnets_dev_label.txt")
+    parser.add_argument("--sonnet_high_quality_path", type=str,
+                        default="data/sonnets_train.txt")
+    parser.add_argument("--sonnet_low_quality_path", type=str,
+                        default="data/low_quality_sonnets_train.txt")
 
     parser.add_argument("--seed", type=int, default=11711)
     parser.add_argument("--epochs", type=int, default=10)
@@ -272,7 +436,8 @@ def get_args():
         "--model_size", type=str, help="The model size as specified on hugging face.",
         choices=['gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'],
         default='gpt2')
-
+    parser.add_argument("--use_pairwise_data", action='store_true')
+    parser.add_argument("--modelpath", type=str, default="")
     args = parser.parse_args()
     return args
 
@@ -298,7 +463,9 @@ def add_arguments(args):
 
 if __name__ == "__main__":
     args = get_args()
-    args.filepath = f'{args.epochs}-{args.lr}-sonnet.pt'  # Save path.
+    args.filepath = f'{args.epochs}-{args.lr}-{args.temperature}--{args.top_p}--{args.batch_size}--{args.model_size}--sonnet.pt'  # Save path.
+    if args.modelpath == "":
+        args.modelpath = args.filepath
     seed_everything(args.seed)  # Fix the seed for reproducibility.
 
     wandb.init(
@@ -307,6 +474,10 @@ if __name__ == "__main__":
         name="sonnet" + datetime.now().strftime("%m-%d %H:%M:%S ")
     )
     wandb.run.log_code(include_fn=lambda path: path.endswith(".py"))
-    train(args)
+    if args.use_pairwise_data:
+        pairwise_train(args)
+    else:
+        train(args)
     generate_submission_sonnets(args)
+    generate_low_quality_sonnets(args)
     wandb.finish()

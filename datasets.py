@@ -170,3 +170,71 @@ class SonnetsDataset(Dataset):
         }
 
         return batched_data
+
+class PairwiseSonnetsDataset(Dataset):
+    def __init__(self, hq_file_path, lq_file_path, quiet=False):
+        """
+        Loads high-quality and low-quality sonnets, ensuring alignment.
+        HQ sonnets provide "better" completions, LQ sonnets provide "worse" completions.
+        """
+        self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # Load high-quality and low-quality sonnets
+        self.hq_sonnets = self._load_sonnets(hq_file_path)
+        self.lq_sonnets = self._load_sonnets(lq_file_path)
+        assert len(self.hq_sonnets) == len(self.lq_sonnets), \
+            "Mismatch: HQ and LQ datasets must have the same number of sonnets!"
+
+        if not quiet:
+            print(f"Loaded {len(self.hq_sonnets)} sonnets from {hq_file_path} (HQ)")
+            print(f"Loaded {len(self.lq_sonnets)} sonnets from {lq_file_path} (LQ)")
+
+    def _load_sonnets(self, file_path):
+        """Reads the file and extracts individual sonnets."""
+        with open(file_path, 'r', encoding='utf-8') as f:
+            text = f.read()
+
+        # Split sonnets based on numbering pattern (e.g., "\n\n1\n\n")
+        sonnets = re.split(r'\n\s*\d+\s*\n', text)[1:]  # Remove header text
+        return [s.strip() for s in sonnets]
+
+    def __len__(self):
+        return len(self.hq_sonnets)
+
+    def __getitem__(self, idx):
+        """Return the prompt (first 3 lines), better completion (HQ), and worse completion (LQ)."""
+        hq_sonnet = self.hq_sonnets[idx].split("\n")  # Split into lines
+        lq_sonnet = self.lq_sonnets[idx].split("\n")  # Split into lines
+        # Extract first 3 lines as the "prompt"
+        prompt = "\n".join(hq_sonnet[:3])  # Use HQ prompt (first 3 lines)
+
+        # Extract remaining lines as completions
+        better_completion = "\n".join(hq_sonnet[3:])  # True Shakespearean continuation
+        worse_completion = "\n".join(lq_sonnet[3:])  # Lower-quality generated completion
+
+        return {
+            "prompt": prompt,
+            "better": better_completion,
+            "worse": worse_completion
+        }
+
+    def collate_fn(self, all_data):
+        """Custom collate function to batch process prompts and completions with enforced LongTensor."""
+        prompts = [example["prompt"] for example in all_data]
+        better_completions = [example["better"] for example in all_data]
+        worse_completions = [example["worse"] for example in all_data]
+        encoding_prompts = self.tokenizer(prompts, return_tensors='pt', padding=True, truncation=True)
+        encoding_better = self.tokenizer(better_completions, return_tensors='pt', padding=True, truncation=True)
+        encoding_worse = self.tokenizer(worse_completions, return_tensors='pt', padding=True, truncation=True)
+        # Ensure token IDs are LongTensor
+        batched_data = {
+            "prompt_ids": torch.LongTensor(encoding_prompts["input_ids"]),
+            "prompt_mask": torch.LongTensor(encoding_prompts["attention_mask"]),
+            "better_ids": torch.LongTensor(encoding_better["input_ids"]),
+            "better_mask": torch.LongTensor(encoding_better["attention_mask"]),
+            "worse_ids": torch.LongTensor(encoding_worse["input_ids"]),
+            "worse_mask": torch.LongTensor(encoding_worse["attention_mask"])
+        }
+
+        return batched_data
