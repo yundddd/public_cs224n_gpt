@@ -3,15 +3,15 @@ import torch
 from torch import nn
 
 class LoRALinear(nn.Module):
-    def __init__(self, in_features, out_features, rank=8, alpha=32):
+    def __init__(self, original_linear, rank=8, alpha=32):
         super().__init__()
-        self.linear = nn.Linear(in_features, out_features)
-        self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
-        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+        self.linear = original_linear
+        self.lora_A = nn.Parameter(torch.zeros(rank, original_linear.in_features))
+        self.lora_B = nn.Parameter(torch.zeros(original_linear.out_features, rank))
         self.scale = alpha / rank
         
         # Improved initialization
-        nn.init.normal_(self.lora_A, std=1/math.sqrt(in_features))
+        nn.init.normal_(self.lora_A, std=1/math.sqrt(original_linear.in_features))
         nn.init.zeros_(self.lora_B)  # Keep output disabled at init
         
         # Freeze base weights
