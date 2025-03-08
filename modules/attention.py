@@ -3,7 +3,14 @@ import torch
 
 from einops import rearrange
 from torch import nn
-from flash_attn.flash_attn_interface import flash_attn_func  # Import FlashAttention
+
+# Make flash_attn import optional
+try:
+    from flash_attn.flash_attn_interface import flash_attn_func  # Import FlashAttention
+    FLASH_ATTN_AVAILABLE = True
+except ImportError:
+    FLASH_ATTN_AVAILABLE = False
+    print("Warning: flash_attn module not found. Using standard attention instead.")
 
 
 class CausalSelfAttention(nn.Module):
@@ -89,7 +96,7 @@ class CausalSelfAttention(nn.Module):
         query_layer = self.transform(hidden_states, self.query)
 
         # Calculate the multi-head attention.
-        if self.use_flash_attention:
+        if self.use_flash_attention and FLASH_ATTN_AVAILABLE:
             attn_output = flash_attn_func(
                 query_layer.half(), key_layer.half(), value_layer.half(), dropout_p= self.dropout_p,causal=True)#dropout =
             attn_output = rearrange(attn_output, 'b h t d -> b t (h d)')
