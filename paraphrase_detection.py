@@ -35,7 +35,7 @@ from tqdm import tqdm
 import wandb
 import os
 # nobody cares about security
-os.environ['WANDB_API_KEY'] = 'd8e70c9cb01a88ace48a2ec6d18bd9e9be24c73b'
+os.environ['WANDB_API_KEY'] = 'd949a6ce67b5e1b2d44dc67ccbdbc699c95b0fcb'
 os.environ['WANDB_ENTITY'] = 'yundddd-stanford-university'
 
 
