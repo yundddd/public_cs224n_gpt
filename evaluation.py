@@ -120,7 +120,6 @@ def model_eval_sonnet(
             expert_layer_counts = output[2]
         else:
             expert_layer_counts += output[2]
-        break
 
     with open("/tmp/sonnet_dev_completion", "w+") as f:
         f.write("--Generated Sonnets-- \n\n")

@@ -567,33 +567,17 @@ def train(args):
             args, model, para_task_dataloaders, sonnet_task_dataloaders, sentiment_task_dataloaders, device)
 
         if expert_count_paraphrase is None:
-            expert_count_paraphrase = expert_count1
-            expert_count_sonnet = expert_count2
-            expert_count_sentiment = expert_count3
+            expert_count_paraphrase = expert_count1 / 1000
+            expert_count_sonnet = expert_count2 / 1000
+            expert_count_sentiment = expert_count3 / 1000
         else:
-            expert_count_paraphrase += expert_count1
-            expert_count_sonnet += expert_count2
-            expert_count_sentiment += expert_count3
+            expert_count_paraphrase += expert_count1 / 1000
+            expert_count_sonnet += expert_count2 / 1000
+            expert_count_sentiment += expert_count3 / 1000
 
-        paraphrase_table = wandb.Table(
-            columns=["exp1", "exp2"],
-            data=expert_count_paraphrase.tolist())
-        sonnet_table = wandb.Table(
-            columns=["exp1", "exp2"],
-            data=expert_count_sonnet.tolist())
-        sentiment_table = wandb.Table(
-            columns=["exp1", "exp2"],
-            data=expert_count_sentiment.tolist())
-
-        wandb.log({
-            "expert_count_paraphrase": paraphrase_table,
-            "expert_count_sonnet": sonnet_table,
-            "expert_count_sentiment": sentiment_table
-        }, commit=True)
-
-        print("expert_count_sonnet", expert_count_paraphrase)
-        print("expert_count_sonnet", expert_count_sonnet)
-        print("expert_count_sentiment", expert_count_sentiment)
+        print("expert_count_sonnet", expert_count_paraphrase.tolist())
+        print("expert_count_sonnet", expert_count_sonnet.tolist())
+        print("expert_count_sentiment", expert_count_sentiment.tolist())
 
         # calculate weighted score between tasks
         if para_dev_acc == 0 or sonnet_dev_acc == 0 or sentiment_dev_acc == 0:
@@ -661,7 +645,7 @@ def evaluate_model(
         sentiment_task_dataloaders["train"],
         model, device, mode="train")
 
-    return para_dev_acc, para_train_acc, sonnet_dev_acc, sonnet_train_acc, sentiment_dev_acc, sentiment_train_acc, torch.log1p(expert_count_paraphrase), torch.log1p(expert_count_sonnet), torch.log1p(expert_count_sentiment)
+    return para_dev_acc, para_train_acc, sonnet_dev_acc, sonnet_train_acc, sentiment_dev_acc, sentiment_train_acc, expert_count_paraphrase, expert_count_sonnet, expert_count_sentiment
 
 
 @torch.no_grad()
