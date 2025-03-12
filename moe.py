@@ -566,14 +566,9 @@ def train(args):
         para_dev_acc, para_train_acc, sonnet_dev_acc, sonnet_train_acc, sentiment_dev_acc, sentiment_train_acc, expert_count1, expert_count2, expert_count3 = evaluate_model(
             args, model, para_task_dataloaders, sonnet_task_dataloaders, sentiment_task_dataloaders, device)
 
-        if expert_count_paraphrase is None:
-            expert_count_paraphrase = expert_count1 / 1000
-            expert_count_sonnet = expert_count2 / 1000
-            expert_count_sentiment = expert_count3 / 1000
-        else:
-            expert_count_paraphrase += expert_count1 / 1000
-            expert_count_sonnet += expert_count2 / 1000
-            expert_count_sentiment += expert_count3 / 1000
+        expert_count_paraphrase = expert_count1 / 1000
+        expert_count_sonnet = expert_count2 / 1000
+        expert_count_sentiment = expert_count3 / 1000
 
         print("expert_count_sonnet", expert_count_paraphrase.tolist())
         print("expert_count_sonnet", expert_count_sonnet.tolist())
