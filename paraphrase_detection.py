@@ -80,10 +80,6 @@ class ParaphraseGPT(nn.Module):
         print(f"Trainable parameters: {trainable_params:,}")
         print(f"Parameter reduction: {100 * (1 - trainable_params/total_params):.2f}%\n")
 
-        # By default, fine-tune the full model.
-        for param in self.gpt.parameters():
-            param.requires_grad = True
-
     def forward(self, input_ids, attention_mask, eval=False):
         """
         TODO: Predict the label of the token using the paraphrase_detection_head Linear layer.
