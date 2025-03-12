@@ -91,4 +91,4 @@ class SwitchTransformerLayer(nn.Module):
             batch_size, seq_len, self.config.intermediate_size))
 
         # Return output and properly tracked aux loss
-        return output, self.aux_loss_weight * aux_loss
+        return output, self.aux_loss_weight * aux_loss, expert_counts

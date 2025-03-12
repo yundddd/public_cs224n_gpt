@@ -29,6 +29,7 @@ def model_eval_paraphrase(dataloader, model, device, mode):
 
     model.eval()  # Switch to eval model, will turn off randomness like dropout.
     y_true, y_pred, sent_ids = [], [], []
+    expert_layer_counts = None
     for step, batch in enumerate(
         tqdm(
             dataloader, desc=f'paraphrase {mode} eval',
@@ -51,10 +52,15 @@ def model_eval_paraphrase(dataloader, model, device, mode):
         y_pred.extend(preds)
         sent_ids.extend(b_sent_ids)
 
+        if expert_layer_counts is None:
+            expert_layer_counts = output["expert_layer_count"]
+        else:
+            expert_layer_counts += output["expert_layer_count"]
+
     f1 = f1_score(y_true, y_pred, average='macro')
     acc = accuracy_score(y_true, y_pred)
 
-    return acc, f1, y_pred, y_true, sent_ids
+    return acc, f1, y_pred, y_true, sent_ids, expert_layer_counts
 
 
 @torch.no_grad()
@@ -91,6 +97,8 @@ def model_eval_sonnet(
 
     generated_sonnets = []
     count = 0
+    expert_layer_counts = None
+
     for batch in tqdm(dev_held_out_dataset, desc=f'sonnet {mode} eval',
                       disable=TQDM_DISABLE):
         sonnet_id = batch[0]
@@ -99,14 +107,20 @@ def model_eval_sonnet(
             return_tensors='pt', padding=False, truncation=True).to(device)
         output = model.generate(
             encoding['input_ids'],
-            temperature=temperature, top_p=top_p)[0][0]
-        decoded_output = model.tokenizer.decode(output)
+            temperature=temperature, top_p=top_p)
+
+        decoded_output = model.tokenizer.decode(output[0][0])
         full_sonnet = f'{decoded_output}\n\n'
         generated_sonnets.append((sonnet_id, full_sonnet))
 
         if count < 1:
             print(f'{decoded_output}\n\n')
             count += 1
+        if expert_layer_counts is None:
+            expert_layer_counts = output[2]
+        else:
+            expert_layer_counts += output[2]
+        break
 
     with open("/tmp/sonnet_dev_completion", "w+") as f:
         f.write("--Generated Sonnets-- \n\n")
@@ -114,7 +128,8 @@ def model_eval_sonnet(
             f.write(f"\n{sonnet[0]}\n")
             f.write(sonnet[1])
 
-    return test_sonnet("/tmp/sonnet_dev_completion", dev_label_path)
+    return test_sonnet(
+        "/tmp/sonnet_dev_completion", dev_label_path), expert_layer_counts
 
 
 def test_sonnet(
@@ -141,6 +156,8 @@ def model_sentiment_eval(dataloader, model, device, mode):
     y_pred = []
     sents = []
     sent_ids = []
+    expert_layer_counts = None
+
     for step, batch in enumerate(
         tqdm(
             dataloader, desc=f'sentiment {mode} eval',
@@ -161,8 +178,12 @@ def model_sentiment_eval(dataloader, model, device, mode):
         y_pred.extend(preds)
         sents.extend(b_sents)
         sent_ids.extend(b_sent_ids)
+        if expert_layer_counts is None:
+            expert_layer_counts = output["expert_layer_count"]
+        else:
+            expert_layer_counts += output["expert_layer_count"]
 
     f1 = f1_score(y_true, y_pred, average='macro')
     acc = accuracy_score(y_true, y_pred)
 
-    return acc, f1, y_pred, y_true, sents, sent_ids
+    return acc, f1, y_pred, y_true, sents, sent_ids, expert_layer_counts

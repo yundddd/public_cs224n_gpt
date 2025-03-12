@@ -72,6 +72,9 @@ class MoEGPT(nn.Module):
             for param in self.gpt.gptmoe_layers.parameters():
                 param.requires_grad = True
 
+        total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Total Trainable Parameters: {total_params}")
+
     def forward(self, input_ids, attention_mask):
         gpt_output = self.gpt(input_ids=input_ids, attention_mask=attention_mask)
         last_token_hidden_state = gpt_output["last_token"]
@@ -83,7 +86,8 @@ class MoEGPT(nn.Module):
         return {"paraphrase_logits": paraphrase_logits,
                 "sentiment_logits": sentiment_logits,
                 "next_token_logits": next_token_logits,
-                "aux_loss": gpt_output["aux_loss"]}
+                "aux_loss": gpt_output["aux_loss"],
+                "expert_layer_count": gpt_output["expert_layer_count"]}
 
     def get_device(self):
         for param in self.gpt.parameters():
@@ -94,10 +98,17 @@ class MoEGPT(nn.Module):
         device = self.get_device()
         token_ids = encoding.to(device)
         attention_mask = torch.ones_like(token_ids, dtype=torch.int64).to(device)
+        expert_layer_counts = None
 
         for _ in range(max_length):
-            logits_last_token = self.forward(token_ids, attention_mask)[
-                "next_token_logits"][:, -1, :] / temperature
+            output = self.forward(token_ids, attention_mask)
+
+            logits_last_token = output["next_token_logits"][:, -1, :] / temperature
+            if expert_layer_counts is None:
+                expert_layer_counts = output["expert_layer_count"]
+            else:
+                expert_layer_counts += output["expert_layer_count"]
+
             probs = torch.nn.functional.softmax(logits_last_token, dim=-1)
 
             # Sort probabilities and indices
@@ -132,7 +143,7 @@ class MoEGPT(nn.Module):
         generated_output = self.tokenizer.decode(
             token_ids[0].cpu().numpy().tolist(),
             skip_special_tokens=True)
-        return token_ids, generated_output
+        return token_ids, generated_output, expert_layer_counts
 
 
 def save_model(model, optimizer, args, filepath):
@@ -474,6 +485,7 @@ def train(args):
     best_score = 0
     patience = 5  # Number of epochs to wait for improvement
     no_improvement_counter = 0  # Counter for epochs without improvement
+    expert_count_paraphrase = expert_count_sonnet = expert_count_sentiment = None
 
     for epoch in range(args.epochs):
         model.train()
@@ -551,8 +563,37 @@ def train(args):
         sentiment_train_loss /= num_batches['sentiment'] if num_batches['sentiment'] > 0 else 1
 
         # evaluate model
-        para_dev_acc, para_train_acc, sonnet_dev_acc, sonnet_train_acc, sentiment_dev_acc, sentiment_train_acc = evaluate_model(
+        para_dev_acc, para_train_acc, sonnet_dev_acc, sonnet_train_acc, sentiment_dev_acc, sentiment_train_acc, expert_count1, expert_count2, expert_count3 = evaluate_model(
             args, model, para_task_dataloaders, sonnet_task_dataloaders, sentiment_task_dataloaders, device)
+
+        if expert_count_paraphrase is None:
+            expert_count_paraphrase = expert_count1
+            expert_count_sonnet = expert_count2
+            expert_count_sentiment = expert_count3
+        else:
+            expert_count_paraphrase += expert_count1
+            expert_count_sonnet += expert_count2
+            expert_count_sentiment += expert_count3
+
+        paraphrase_table = wandb.Table(
+            columns=["exp1", "exp2"],
+            data=expert_count_paraphrase.tolist())
+        sonnet_table = wandb.Table(
+            columns=["exp1", "exp2"],
+            data=expert_count_sonnet.tolist())
+        sentiment_table = wandb.Table(
+            columns=["exp1", "exp2"],
+            data=expert_count_sentiment.tolist())
+
+        wandb.log({
+            "expert_count_paraphrase": paraphrase_table,
+            "expert_count_sonnet": sonnet_table,
+            "expert_count_sentiment": sentiment_table
+        }, commit=True)
+
+        print("expert_count_sonnet", expert_count_paraphrase)
+        print("expert_count_sonnet", expert_count_sonnet)
+        print("expert_count_sentiment", expert_count_sentiment)
 
         # calculate weighted score between tasks
         if para_dev_acc == 0 or sonnet_dev_acc == 0 or sentiment_dev_acc == 0:
@@ -593,32 +634,34 @@ def evaluate_model(
         args, model, para_task_dataloaders, sonnet_task_dataloaders,
         sentiment_task_dataloaders, device):
     """Evaluate model on all tasks."""
-    if args.debug or args.no_eval:
+    if args.no_eval:
         return 0, 0, 0, 0, 0, 0  # Skip evaluation in debug mode
-    para_dev_acc, *_ = model_eval_paraphrase(
+    para_dev_acc, *_, expert_count_paraphrase = model_eval_paraphrase(
         para_task_dataloaders["dev"],
         model, device, mode="dev")
     para_train_acc, *_ = model_eval_paraphrase(
         para_task_dataloaders["train"],
         model, device, mode="train")
 
-    sonnet_dev_acc = model_eval_sonnet(
+    sonnet_dev_acc, expert_count_sonnet = model_eval_sonnet(
         sonnet_task_dataloaders["dev_held_out"],
         sonnet_task_dataloaders["dev_label_path"],
-        model, device, args.temperature, args.top_p, mode="dev") / 100
-    sonnet_train_acc = model_eval_sonnet(
+        model, device, args.temperature, args.top_p, mode="dev")
+    sonnet_dev_acc /= 100
+    sonnet_train_acc, _ = model_eval_sonnet(
         sonnet_task_dataloaders["train_held_out"],
         sonnet_task_dataloaders["train_held_out_label_path"],
-        model, device, args.temperature, args.top_p, mode="train") / 100
+        model, device, args.temperature, args.top_p, mode="train")
+    sonnet_train_acc /= 100
 
-    sentiment_dev_acc, *_ = model_sentiment_eval(
+    sentiment_dev_acc, *_, expert_count_sentiment = model_sentiment_eval(
         sentiment_task_dataloaders["dev"],
         model, device, mode="dev")
     sentiment_train_acc, *_ = model_sentiment_eval(
         sentiment_task_dataloaders["train"],
         model, device, mode="train")
 
-    return para_dev_acc, para_train_acc, sonnet_dev_acc, sonnet_train_acc, sentiment_dev_acc, sentiment_train_acc
+    return para_dev_acc, para_train_acc, sonnet_dev_acc, sonnet_train_acc, sentiment_dev_acc, sentiment_train_acc, torch.log1p(expert_count_paraphrase), torch.log1p(expert_count_sonnet), torch.log1p(expert_count_sentiment)
 
 
 @torch.no_grad()
@@ -632,38 +675,21 @@ def test_paraphrase(args):
     model.eval()
     print(f"Loaded model to test from {args.filepath}")
 
-    para_dev_data = load_paraphrase_data(args.para_dev)
     para_test_data = load_paraphrase_data(args.para_test, split='test')
 
-    para_dev_data = ParaphraseDetectionDataset(para_dev_data, args)
     para_test_data = ParaphraseDetectionTestDataset(para_test_data, args)
 
-    para_dev_dataloader = DataLoader(
-        para_dev_data, shuffle=False, batch_size=args.batch_size,
-        collate_fn=para_dev_data.collate_fn)
     para_test_dataloader = DataLoader(
         para_test_data, shuffle=False, batch_size=args.batch_size,
         collate_fn=para_test_data.collate_fn)
 
-    dev_para_acc, _, dev_para_y_pred, _, dev_para_sent_ids = model_eval_paraphrase(
-        para_dev_dataloader,
-        model,
-        device)
-    print(f"dev paraphrase acc :: {dev_para_acc:.3f}")
     test_para_y_pred, test_para_sent_ids = model_test_paraphrase(
         para_test_dataloader, model, device)
-
-    with open(args.para_dev_out, "w+") as f:
-        f.write("id \t Predicted_Is_Paraphrase \n")
-        for p, s in zip(dev_para_sent_ids, dev_para_y_pred):
-            f.write(f"{p}, {s} \n")
 
     with open(args.para_test_out, "w+") as f:
         f.write("id \t Predicted_Is_Paraphrase \n")
         for p, s in zip(test_para_sent_ids, test_para_y_pred):
             f.write(f"{p}, {s} \n")
-
-    wandb.log({"best dev": dev_para_acc})
 
 
 @torch.no_grad()

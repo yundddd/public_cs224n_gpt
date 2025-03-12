@@ -13,6 +13,6 @@ class GPT2MoELayer(GPT2Layer):
             attention_mask)
         out = self.add(hidden_states, attention,
                        self.attention_dense, self.attention_dropout)
-        mlp, aux_loss = self.moe(self.out_layer_norm(out))
+        mlp, aux_loss, expert_counts = self.moe(self.out_layer_norm(out))
         out = self.add(out, mlp, self.out_dense, self.out_dropout)
-        return out, aux_loss
+        return out, aux_loss, expert_counts
