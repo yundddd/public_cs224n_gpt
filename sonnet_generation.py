@@ -73,9 +73,6 @@ class SonnetGPT(nn.Module):
         print(f"Trainable parameters: {trainable_params:,}")
         print(f"Parameter reduction: {100 * (1 - trainable_params/total_params):.2f}%\n")
 
-        # By default, fine-tune the full model. TODO: this is maybe not idea.
-        for param in self.gpt.parameters():
-            param.requires_grad = True
 
     def forward(self, input_ids, attention_mask):
         """
